@@ -1,0 +1,269 @@
+"""Module 4 -- Component extractor: consolidation + cross-reference.
+
+Runs the Module 2 code parser across every `.py` file in the manifest and merges
+the per-file results into one `ComponentInventory`:
+
+- flat tool list (concatenated across files)
+- one graph (nodes/edges/conditional edges/entry point merged)
+- one state schema (fields deduped by name)
+- one config (kwargs/env vars/constants merged)
+
+It then cross-references the AST results against the README (AST is
+authoritative -- mismatches become warnings, never overrides) and assigns a
+`FileAction` (`rewrite` / `adapt` / `copy_through`) to every file in the
+manifest, in place.
+
+Framework-agnostic: consumes/produces only the frozen contracts.
+"""
+
+from __future__ import annotations
+
+import os
+
+from converter.config import Config
+from converter.contracts import (
+    ComponentInventory,
+    ConfigSpec,
+    FileAction,
+    FileEntry,
+    FileType,
+    GraphSpec,
+    ReadmeSections,
+    RepoManifest,
+    ToolSpec,
+)
+from converter.parser.code_parser import (
+    extract_config,
+    extract_functions,
+    extract_graph,
+    extract_imports,
+    extract_preamble,
+    extract_state,
+    extract_state_class_names,
+    extract_tools,
+)
+
+
+def _read_source(input_root: str, relative_path: str) -> str | None:
+    abs_path = os.path.join(input_root, relative_path)
+    try:
+        with open(abs_path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _segments(relative_path: str) -> list[str]:
+    return relative_path.replace("\\", "/").split("/")
+
+
+def _excluded_from_extraction(relative_path: str, config: Config) -> bool:
+    """True for non-source files (tests, sample data, docs, ...) and test files."""
+    segs = _segments(relative_path)
+    if any(seg in config.extraction_exclude_dirs for seg in segs):
+        return True
+    base = segs[-1]
+    return base.startswith("test_") or base.endswith("_test.py") or base == "conftest.py"
+
+
+def _is_tools_module(relative_path: str, config: Config) -> bool:
+    """True for a source file whose public functions are tools (R-01).
+
+    A file living under a `tools/` directory (any depth) is a tools module even
+    without an @tool decorator. `__init__.py` and `*_wrapper.py` (e.g. a
+    call_tool wrapper, R-09) are excluded.
+    """
+    segs = _segments(relative_path)
+    base = segs[-1]
+    if config.tools_dir_name not in segs[:-1]:
+        return False
+    return base != "__init__.py" and not base.endswith("_wrapper.py")
+
+
+def _tools_from_module(functions, source_file: str, existing: list[ToolSpec]) -> list[ToolSpec]:
+    """Turn a tools module's public functions into ToolSpecs (with real bodies)."""
+    have = {t.name for t in existing}
+    tools: list[ToolSpec] = []
+    for fn in functions.values():
+        if fn.name.startswith("_") or fn.name in have:
+            continue
+        tools.append(
+            ToolSpec(
+                name=fn.name,
+                params=fn.params,
+                docstring=fn.docstring,
+                returns=fn.returns,
+                source_file=source_file,
+                body=fn.body,
+                signature=fn.signature,
+            )
+        )
+    return tools
+
+
+def _graph_is_present(graph: GraphSpec) -> bool:
+    return bool(
+        graph.nodes or graph.edges or graph.conditional_edges or graph.entry_point
+    )
+
+
+def _merge_graph(into: GraphSpec, extra: GraphSpec) -> None:
+    existing = {n.name for n in into.nodes}
+    for node in extra.nodes:
+        if node.name not in existing:
+            into.nodes.append(node)
+            existing.add(node.name)
+    into.edges.extend(extra.edges)
+    into.conditional_edges.extend(extra.conditional_edges)
+    if into.entry_point is None and extra.entry_point is not None:
+        into.entry_point = extra.entry_point
+
+
+def _merge_config(into: ConfigSpec, extra: ConfigSpec, include_constants: bool = True) -> None:
+    into.llm_kwargs.update(extra.llm_kwargs)
+    for env in extra.env_vars:
+        if env not in into.env_vars:
+            into.env_vars.append(env)
+    if include_constants:
+        into.constants.update(extra.constants)
+    if into.temperature is None and extra.temperature is not None:
+        into.temperature = extra.temperature
+
+
+def _cross_reference(
+    inventory: ComponentInventory, readme: ReadmeSections
+) -> list[str]:
+    """Compare AST findings to README docs. AST wins; drift => warnings."""
+    warnings: list[str] = []
+
+    ast_tools = {t.name for t in inventory.tools}
+    readme_tools = {t.name for t in readme.tools}
+    for name in sorted(readme_tools - ast_tools):
+        warnings.append(
+            f"README documents tool '{name}' but no matching @tool was found in code."
+        )
+    for name in sorted(ast_tools - readme_tools):
+        warnings.append(
+            f"Tool '{name}' found in code but not documented in the README Tools section."
+        )
+
+    ast_state = {f.name for f in inventory.state}
+    readme_state = {s.name for s in readme.state}
+    for name in sorted(readme_state - ast_state):
+        warnings.append(
+            f"README documents state field '{name}' but it was not found in any TypedDict."
+        )
+    for name in sorted(ast_state - readme_state):
+        warnings.append(
+            f"State field '{name}' found in code but not documented in the README State section."
+        )
+
+    return warnings
+
+
+def _assign_file_action(
+    entry: FileEntry,
+    per_file: dict[str, dict[str, bool]],
+) -> FileAction:
+    """Decide what the generator does with a file.
+
+    - README            -> rewrite (regenerated by Module 8)
+    - .py with graph/state -> rewrite (orchestration/context regenerated)
+    - .py with only tools  -> adapt  (tool bodies become plugin methods)
+    - everything else      -> copy_through (helpers, prompts, requirements, ...)
+    """
+    if entry.file_type is FileType.README:
+        return FileAction.REWRITE
+
+    if entry.file_type is FileType.PYTHON:
+        found = per_file.get(entry.relative_path, {})
+        if found.get("graph") or found.get("state"):
+            return FileAction.REWRITE
+        if found.get("tools"):
+            return FileAction.ADAPT
+
+    return FileAction.COPY_THROUGH
+
+
+def extract_components(
+    manifest: RepoManifest,
+    readme: ReadmeSections | None = None,
+    config: Config | None = None,
+) -> ComponentInventory:
+    """Consolidate all parser output into one `ComponentInventory`.
+
+    Also assigns `file_action` to every file in `manifest` (mutates in place --
+    the `FileEntry.file_action` field is defined to be filled in here).
+    """
+    config = config or Config()
+    inventory = ComponentInventory()
+    per_file: dict[str, dict[str, bool]] = {}
+
+    for entry in manifest.python_files():
+        # Skip non-source files (tests/, sample_data/, docs/, ...): their
+        # functions/config/constants must not pollute the IR.
+        if _excluded_from_extraction(entry.relative_path, config):
+            continue
+        source = _read_source(manifest.input_root, entry.relative_path)
+        if source is None:
+            inventory.warnings.append(f"Could not read {entry.relative_path}; skipped.")
+            continue
+        try:
+            tools = extract_tools(source, source_file=entry.relative_path)
+            graph = extract_graph(source)
+            state = extract_state(source)
+            file_config = extract_config(source)
+            functions = extract_functions(source, source_file=entry.relative_path)
+            imports = extract_imports(source)
+            preamble = extract_preamble(source)
+        except SyntaxError as exc:
+            inventory.warnings.append(
+                f"{entry.relative_path} did not parse ({exc.msg}); skipped."
+            )
+            continue
+
+        # R-01: tools are @tool-decorated functions OR any public function that
+        # lives in a tools/ module (no decorator needed).
+        if _is_tools_module(entry.relative_path, config):
+            tools = tools + _tools_from_module(functions, entry.relative_path, tools)
+
+        inventory.tools.extend(tools)
+        _merge_graph(inventory.graph, graph)
+        # Constants are carried from any non-excluded file (single-file agents keep
+        # them in the main module). Sample-data / test noise is already excluded by
+        # directory above, which is what kept SEED/GRAPH/... out of config.
+        _merge_config(inventory.config, file_config)
+
+        # Functions: first definition wins (avoid clobbering across files).
+        for name, spec in functions.items():
+            inventory.functions.setdefault(name, spec)
+        for line in imports:
+            if line not in inventory.imports:
+                inventory.imports.append(line)
+        for line in preamble:
+            if line not in inventory.preamble:
+                inventory.preamble.append(line)
+
+        existing_state = {f.name for f in inventory.state}
+        for field in state:
+            if field.name not in existing_state:
+                inventory.state.append(field)
+                existing_state.add(field.name)
+
+        for cls_name in extract_state_class_names(source):
+            if cls_name not in inventory.state_class_names:
+                inventory.state_class_names.append(cls_name)
+
+        per_file[entry.relative_path] = {
+            "tools": bool(tools),
+            "graph": _graph_is_present(graph),
+            "state": bool(state),
+        }
+
+    if readme is not None:
+        inventory.warnings.extend(_cross_reference(inventory, readme))
+
+    for entry in manifest.files:
+        entry.file_action = _assign_file_action(entry, per_file)
+
+    return inventory

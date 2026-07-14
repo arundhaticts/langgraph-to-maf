@@ -1,0 +1,22 @@
+{
+  "framework": "maf",
+  "display_name": "Microsoft Agent Framework",
+  "vocabulary": {
+    "tool": "skill",
+    "tools_heading": "Skills",
+    "state": "context",
+    "state_heading": "Context",
+    "graph": "orchestration",
+    "node": "step function",
+    "conditional_edge": "router dispatch"
+  },
+  "conventions": {
+    "context_class": "AgentContext",
+    "node_signature": "def name(ctx: AgentContext) -> AgentContext",
+    "router_signature": "def name(ctx: AgentContext) -> str",
+    "orchestration_entry": "def run(ctx: AgentContext) -> AgentContext",
+    "tool_decorator": "@kernel_function",
+    "append_only_update": "ctx.field.append(value)",
+    "hitl_exception": "HumanApprovalRequired"
+  }
+}

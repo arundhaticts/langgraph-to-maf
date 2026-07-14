@@ -1,0 +1,29 @@
+# Framework Conversion Utility -- Python dependencies.
+# Install everything at once:
+#     pip install -r requirements.txt
+#
+# (The React frontend is separate: cd frontend && npm install)
+
+# ---- Core converter (always required) ----
+Jinja2>=3.1
+
+# ---- Web backend (FastAPI + ASGI server) ----
+fastapi>=0.110
+uvicorn>=0.29
+
+# ---- Dev / test ----
+pytest>=8.0
+httpx>=0.27        # required by FastAPI's TestClient in the test suite
+
+# ---- OPTIONAL: Gemini SDK for Tier 3 ------------------------------------------
+# NOT required. Tier 3 (HITL + complex orchestration) already works over the
+# stdlib REST API using just GEMINI_API_KEY (in .env) -- no SDK needed.
+#
+# The SDK is only "preferred if installed". Enabling it here can fail behind a
+# locked-down mirror (google-genai pulls `websockets`, which some proxies 403).
+# If you still want the SDK, uncomment the lines below; if the mirror blocks
+# websockets 16.x, add the pin too:
+#
+# google-genai>=0.3
+# truststore>=0.9          # lets the SDK use the OS trust store (TLS proxies)
+# websockets<16            # pin only if the mirror 403s on websockets 16.x

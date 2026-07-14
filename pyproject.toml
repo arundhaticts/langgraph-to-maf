@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "framework-converter"
+version = "0.1.0"
+description = "Framework Conversion Utility - translates AI agents between frameworks via a neutral IR"
+requires-python = ">=3.10"
+dependencies = [
+    "Jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+# Optional Gemini SDK for Tier 3. Not required -- Tier 3 falls back to the stdlib
+# REST API. Use the newer google-genai (httpx-based), NOT google-generativeai
+# (which needs grpcio). Preferred automatically when installed. `truststore`
+# lets the SDK use the OS trust store (needed behind TLS-intercepting proxies).
+llm = ["google-genai>=0.3", "truststore>=0.9"]
+
+[project.scripts]
+convert-agent = "converter.main:main"
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+include = ["converter*"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/converter/tests"]
+# Put backend/ on sys.path so `import converter`, `import api`, `import service`
+# resolve during tests.
+pythonpath = ["backend"]

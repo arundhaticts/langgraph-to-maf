@@ -1,0 +1,11 @@
+# Core orchestration
+langgraph
+langchain-core
+# LLM
+google-genai
+# NLP / utils
+sentence-transformers
+pydantic
+python-dotenv
+# tests
+pytest

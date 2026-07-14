@@ -1,0 +1,36 @@
+# {{ title }}
+
+## Purpose
+{{ purpose }}
+
+## Framework
+{{ framework }}
+
+## {{ skills_heading }}
+{% if skills %}{% for s in skills %}- `{{ s.plugin_class }}.{{ s.method }}`: {{ s.description }}
+{% endfor %}{% else %}N/A
+{% endif %}
+## Workflow
+Orchestration pattern: **{{ workflow_pattern }}**.
+
+{{ workflow_description }}
+{% if has_hitl %}
+> **Human-in-the-loop:** the steps {{ hitl_nodes }} used `interrupt()` in the
+> source and were converted to `HumanApprovalRequired` stubs. Wire the approval
+> flow before deploying.
+{% endif %}{% if has_checkpointer %}
+> **Persistence:** the source used a checkpointer/saver. A persistence layer is
+> stubbed with a `TODO` and must be wired for paused runs.
+{% endif %}
+## {{ context_heading }}
+{% if context_fields %}{% for f in context_fields %}- `{{ f.name }}` ({{ f.type }}){% if f.append_only %} — append-only, use `.append()`{% endif %}
+{% endfor %}{% else %}N/A
+{% endif %}
+## Configuration
+{% if config_constants %}{% for name, value in config_constants.items() %}- `{{ name }}` = `{{ value }}`
+{% endfor %}{% else %}N/A
+{% endif %}{% if temperature is not none %}- temperature: `{{ temperature }}`
+{% endif %}
+## Dependencies
+This converted agent targets **{{ framework }}**. Install the {{ framework }} SDK
+and port any source-specific dependencies from the original project.
