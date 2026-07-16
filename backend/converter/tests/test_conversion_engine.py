@@ -45,7 +45,7 @@ def test_tool_rule_r01():
     units = _units_by_rule(convert(ir))
     r01 = units["R-01"]
     targets = {u.target_ref for u in r01}
-    assert targets == {"ReadTestsPlugin", "DetectFlakyTestsPlugin"}
+    assert targets == {"ReadTestsTool", "DetectFlakyTestsTool"}
     assert all(u.tier is Tier.TIER1 for u in r01)
 
 

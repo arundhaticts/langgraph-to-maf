@@ -39,14 +39,13 @@ def _ir(**kw) -> IR:
 
 def test_uses_maf_vocabulary():
     md = build_readme(_ir())
-    assert "## Skills" in md          # R-13: Tools -> Skills
+    assert "## Tools" in md            # true-MAF vocabulary
     assert "## Context" in md          # State -> Context
-    assert "## Tools" not in md
 
 
 def test_lists_skills_as_plugins():
     md = build_readme(_ir())
-    assert "`ReadTestsPlugin.read_tests`: Reads tests." in md
+    assert "`ReadTestsTool.read_tests`: Reads tests." in md
 
 
 def test_context_fields_and_append_only():
@@ -87,5 +86,5 @@ def test_pattern_shown():
 def test_no_tools_shows_na():
     ir = _ir(tools=[])
     md = build_readme(ir)
-    # Skills section present but empty -> N/A
-    assert "## Skills\nN/A" in md
+    # Tools section present but empty -> N/A
+    assert "## Tools\nN/A" in md

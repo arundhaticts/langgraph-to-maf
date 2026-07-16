@@ -76,6 +76,19 @@ class OrchestrationPattern(str, Enum):
     AGENT_DRIVEN = "agent_driven"
 
 
+class OrchestrationMode(str, Enum):
+    """How the target should realise the orchestration (Phase 0 decision).
+
+    Encoded in the IR so the generator picks the right target shape:
+    - SINGLE_AGENT: one ReAct-style agent with tools, no branches/loops/HITL
+      -> a single `ChatAgent(tools=[...])` on the target side.
+    - GRAPH_WORKFLOW: multi-node graph with branches / loops / HITL
+      -> a `WorkflowBuilder` + executors on the target side.
+    """
+    SINGLE_AGENT = "single_agent"
+    GRAPH_WORKFLOW = "graph_workflow"
+
+
 class Tier(str, Enum):
     """Which tier resolved a given conversion."""
     TIER1 = "tier1"            # deterministic rules
@@ -204,6 +217,7 @@ class StateField:
     type: str
     description: Optional[str] = None
     is_append_only: bool = False   # Annotated[list, add] reducer detected
+    default: Optional[str] = None  # source-level default, if any (verbatim src)
 
 
 @dataclass
@@ -211,6 +225,11 @@ class GraphNode:
     name: str
     target_callable: Optional[str] = None  # function bound to the node
     role: Optional[NodeRole] = None         # assigned by IR builder
+    # Data-flow captured by the IR builder (Phase 1). `reads`/`writes` are state
+    # field names the node reads / writes; `calls_tools` are tool names invoked.
+    reads: list[str] = field(default_factory=list)
+    writes: list[str] = field(default_factory=list)
+    calls_tools: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -224,6 +243,49 @@ class ConditionalEdge:
     source: str
     router: Optional[str] = None            # routing function name
     outcomes: dict[str, str] = field(default_factory=dict)  # branch label -> target node
+
+
+@dataclass
+class FlatEdge:
+    """A router/edge flattened to a single explicit triple at IR-build time.
+
+    Every unconditional edge and every conditional-edge outcome becomes one
+    `FlatEdge`, so the generator never has to flatten a router mapping itself.
+    `condition_label` is None for unconditional edges; `router` names the routing
+    function for conditional ones. `is_loop` marks a back-edge (Phase 1).
+    """
+    source: str
+    target: str
+    condition_label: Optional[str] = None
+    router: Optional[str] = None
+    is_loop: bool = False
+
+
+@dataclass
+class LoopGuard:
+    """The termination guard for one loop back-edge (Phase 1 metadata).
+
+    `loop_node` is the node that the back-edge returns to; `router` is the
+    function that decides continue-vs-exit; `counter_const` is the config
+    constant that caps the iterations (e.g. MAX_GEN_RETRIES) if one was found;
+    `exit_labels` are the router outcomes that leave the loop.
+    """
+    loop_node: str
+    router: Optional[str] = None
+    counter_const: Optional[str] = None
+    exit_labels: list[str] = field(default_factory=list)
+
+
+@dataclass
+class HitlPoint:
+    """A human-in-the-loop pause point (Phase 1).
+
+    `payload` is the verbatim source of the `interrupt(...)` argument (the shape
+    handed to the human); `resume_contract` describes what the resumed value is.
+    """
+    node: str
+    payload: Optional[str] = None
+    resume_contract: Optional[str] = None
 
 
 @dataclass
@@ -241,6 +303,10 @@ class ConfigSpec:
     env_vars: list[str] = field(default_factory=list)
     constants: dict[str, Any] = field(default_factory=dict)
     temperature: Optional[float] = None
+    # Source LLM provider constructor name (e.g. "ChatOpenAI"), if detected.
+    llm_provider: Optional[str] = None
+    # Source persistence/checkpointer construct (e.g. "MemorySaver"), if any.
+    checkpointer: Optional[str] = None
 
 
 @dataclass
@@ -258,6 +324,8 @@ class ComponentInventory:
     preamble: list[str] = field(default_factory=list)
     # Names of the source state TypedDict class(es), for backward-compat aliases.
     state_class_names: list[str] = field(default_factory=list)
+    # Source persistence/checkpointer construct (e.g. "MemorySaver"), if any.
+    checkpointer: Optional[str] = None
     # Cross-reference warnings (AST is authoritative over README).
     warnings: list[str] = field(default_factory=list)
 
@@ -275,6 +343,10 @@ class WorkflowSpec:
     conditional_edges: list[ConditionalEdge] = field(default_factory=list)
     entry_point: Optional[str] = None
     readme_description: Optional[str] = None  # verbatim workflow prose (Tier 2)
+    # Phase 1 flattening + explicit control-flow metadata.
+    flat_edges: list[FlatEdge] = field(default_factory=list)
+    loop_guards: list[LoopGuard] = field(default_factory=list)
+    hitl_points: list[HitlPoint] = field(default_factory=list)
 
 
 @dataclass
@@ -282,6 +354,12 @@ class IRMetadata:
     description: Optional[str] = None          # from README Purpose
     source_framework: Optional[str] = None
     target_framework: Optional[str] = None
+    # Phase 0 decisions recorded into the IR.
+    target_framework_version: Optional[str] = None  # installed target SDK version
+    orchestration_mode: Optional[OrchestrationMode] = None
+    llm_provider: Optional[str] = None         # source LLM provider carried over
+    checkpointer: Optional[str] = None         # source persistence construct
+    entrypoint: Optional[str] = None           # "api" (FastAPI/Flask) or "cli"
 
 
 @dataclass

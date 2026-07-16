@@ -110,6 +110,16 @@ class _StateToCtx(ast.NodeTransformer):
             for s in stmts:
                 ast.copy_location(s, node)
             return stmts
+        # Node returns a COMPUTED value (e.g. `out` where out is a dict built
+        # above, or `{**state, ...}`). Apply it to ctx at runtime via the injected
+        # `_apply_updates` helper. `return ctx` / `return None` are left as-is.
+        if self.transform_returns and node.value is not None:
+            val = self.visit(node.value)
+            if isinstance(val, ast.Name) and val.id == "ctx":
+                node.value = val
+                return node
+            new = ast.parse(f"return _apply_updates(ctx, {ast.unparse(val)})").body[0]
+            return ast.copy_location(new, node)
         self.generic_visit(node)
         return node
 

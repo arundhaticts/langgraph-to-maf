@@ -27,6 +27,7 @@ from pydantic import BaseModel
 # Make `converter` and `service` importable regardless of how uvicorn is launched.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from converter.adapters import list_frameworks  # noqa: E402
 from converter.config import Config  # noqa: E402
 from converter.scanner import ScannerError  # noqa: E402
 from service import convert_folder, convert_local_path  # noqa: E402
@@ -52,11 +53,23 @@ class UploadedFile(BaseModel):
 class ConvertRequest(BaseModel):
     mode: str = "llm"                 # "llm" | "manual"
     files: list[UploadedFile]
+    target: str = "maf"              # target framework name
+    # Target-framework pack folder uploaded in the UI (must contain a
+    # vocabulary.json). It is saved to frameworks/<target>/ and drives conversion.
+    framework_files: list[UploadedFile] = []
 
 
 class ConvertPathRequest(BaseModel):
     mode: str = "llm"                 # "llm" | "manual"
     path: str                        # local folder path (backend reads from disk)
+    target: str = "maf"
+    framework_files: list[UploadedFile] = []
+
+
+@app.get("/api/frameworks")
+def frameworks() -> dict:
+    """Targetable framework names (built-ins + uploaded packs on disk)."""
+    return {"frameworks": list_frameworks()}
 
 
 @app.get("/api/health")
@@ -68,10 +81,16 @@ def health() -> dict:
 def convert(request: ConvertRequest) -> Response:
     if not request.files:
         raise HTTPException(status_code=400, detail="No files were uploaded.")
+    if not request.framework_files:
+        raise HTTPException(
+            status_code=400,
+            detail="Upload the target framework folder (with vocabulary.json).",
+        )
     payload = [f.model_dump() for f in request.files]
+    pack = [f.model_dump() for f in request.framework_files]
     try:
-        zip_bytes = convert_folder(payload, request.mode)
-    except ScannerError as exc:
+        zip_bytes = convert_folder(payload, request.mode, request.target, pack)
+    except (ScannerError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # noqa: BLE001 - surface failures to the UI
         raise HTTPException(status_code=500, detail=str(exc))
@@ -87,9 +106,15 @@ def convert_path(request: ConvertPathRequest) -> Response:
     """
     if not request.path.strip():
         raise HTTPException(status_code=400, detail="No folder path provided.")
+    if not request.framework_files:
+        raise HTTPException(
+            status_code=400,
+            detail="Upload the target framework folder (with vocabulary.json).",
+        )
+    pack = [f.model_dump() for f in request.framework_files]
     try:
-        zip_bytes = convert_local_path(request.path, request.mode)
-    except (ScannerError, NotADirectoryError) as exc:
+        zip_bytes = convert_local_path(request.path, request.mode, request.target, pack)
+    except (ScannerError, NotADirectoryError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc))

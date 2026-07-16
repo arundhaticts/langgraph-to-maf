@@ -90,6 +90,7 @@ class Config:
     llm_api_key_env: str = "GEMINI_API_KEY"
 
     # Framework knowledge store root (relative to package), Tier 3 context.
+    # Uploaded framework packs are stored here as `frameworks/<name>/`.
     frameworks_dir: str = "frameworks"
 
     # Input contract.
@@ -112,6 +113,11 @@ class Config:
     # Folder name (any path segment) whose Python files are tools (R-01), even
     # without an @tool decorator.
     tools_dir_name: str = "tools"
+
+    # Phase 11: after generating, run the runnable-validation subprocess checks
+    # (import the agent_framework stub + build_workflow) and record them in
+    # ACCEPTANCE.md. Off during the test suite to avoid per-test subprocess cost.
+    validate_output: bool = False
 
     @property
     def allow_llm_fallback(self) -> bool:

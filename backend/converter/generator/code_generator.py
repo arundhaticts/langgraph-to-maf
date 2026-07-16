@@ -42,6 +42,7 @@ from converter.contracts import (
     FileAction,
     FunctionSpec,
     NodeRole,
+    OrchestrationMode,
     OrchestrationPattern,
     StateField,
     Tier,
@@ -140,13 +141,51 @@ def _typing_imports(ir: IR) -> str:
     return "from typing import " + ", ".join(sorted(used))
 
 
+# Names allowed to appear in a state field annotation emitted into a pydantic
+# model. Anything referencing a name outside this set is type-erased to `Any`
+# so the generated BaseModel always resolves its annotations (pydantic evaluates
+# them at class-definition time, unlike a plain dataclass).
+_PYDANTIC_SAFE_NAMES = frozenset(
+    {
+        "str", "int", "float", "bool", "bytes", "complex", "list", "dict",
+        "tuple", "set", "frozenset", "bytearray", "None", "NoneType", "object",
+        "Any", "Optional", "Union", "List", "Dict", "Tuple", "Set", "Callable",
+        "Annotated", "Sequence", "Mapping", "Literal", "Iterable", "Iterator",
+    }
+)
+
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _pydantic_safe_type(type_str: str) -> str:
+    """Return `type_str` if every identifier it names is resolvable, else "Any".
+
+    Literal string/number members are not identifiers, so `Literal['a', 'b']`
+    stays intact; a custom class the output would not import becomes `Any`.
+    """
+    text = (type_str or "").strip()
+    if not text:
+        return "Any"
+    # Identifiers that are attribute members (x.y -> y) are always safe to ignore
+    # for resolvability of the leading name; check every bare identifier.
+    for match in _IDENTIFIER_RE.finditer(text):
+        name = match.group(0)
+        # Skip attribute members: if preceded by '.', it's an attribute access.
+        start = match.start()
+        if start > 0 and text[start - 1] == ".":
+            continue
+        if name not in _PYDANTIC_SAFE_NAMES:
+            return "Any"
+    return text
+
+
 def _state_field_decl(f: StateField) -> str:
     if f.is_append_only:
         return (
-            f"    {f.name}: list = field(default_factory=list)"
-            f"  # was Annotated[{f.type}, add]; use .append()"
+            f"    {f.name}: list = Field(default_factory=list)"
+            f"  # was Annotated[{f.type}, add]; .advance() extends it"
         )
-    base = f.type or "Any"
+    base = _pydantic_safe_type(f.type or "Any")
     return f"    {f.name}: Optional[{base}] = None"
 
 
@@ -258,6 +297,20 @@ def _rewrite_import_line(line: str, source_root: str, inlined: set[str]) -> str 
     return line
 
 
+def _rewrite_path_anchors(content: str, source_root: str | None) -> str:
+    """Re-base source-relative path string literals onto the flattened output tree.
+
+    The output drops the source's top package dir (e.g. `src/`), so a literal like
+    "src/prompts/system.md" must become "prompts/system.md" to still resolve at
+    runtime. Only string literals whose FIRST path segment is the source root are
+    rewritten; everything else is left untouched.
+    """
+    if not source_root:
+        return content
+    pattern = re.compile(r"([\"'])" + re.escape(source_root) + r"([/\\])")
+    return pattern.sub(r"\1", content)
+
+
 def _rewrite_imports_in_text(content: str, source_root: str, inlined: set[str]) -> str:
     """Rewrite/drop every import line in a block of generated code."""
     out: list[str] = []
@@ -269,6 +322,141 @@ def _rewrite_imports_in_text(content: str, source_root: str, inlined: set[str]) 
             out.append(new)
         else:
             out.append(line)
+    return "\n".join(out)
+
+
+import builtins as _builtins
+
+_BUILTIN_NAMES = frozenset(dir(_builtins)) | {"__name__", "__file__", "self"}
+
+
+def _names_used(text: str) -> set[str]:
+    """Every identifier referenced in a block of code (Name + attribute roots)."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        # Best-effort: fall back to a word scan so curation still trims obvious junk.
+        return set(re.findall(r"[A-Za-z_]\w*", text))
+    used: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            used.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            base = node
+            while isinstance(base, ast.Attribute):
+                base = base.value
+            if isinstance(base, ast.Name):
+                used.add(base.id)
+    return used
+
+
+def _import_bound_names(line: str) -> list[str]:
+    """Names an import statement binds into scope (asname wins)."""
+    try:
+        node = ast.parse(line.strip()).body[0]
+    except (SyntaxError, IndexError):
+        return []
+    out: list[str] = []
+    if isinstance(node, ast.Import):
+        for a in node.names:
+            out.append((a.asname or a.name.split(".")[0]))
+    elif isinstance(node, ast.ImportFrom):
+        for a in node.names:
+            out.append(a.asname or a.name)
+    return out
+
+
+def _curate_imports(lines: list[str], used: set[str], config_consts) -> str:
+    """Keep only import lines whose bound names are actually used in the body.
+
+    - Drops `from __future__` (rendered once at the top of the template).
+    - For `from config import ...`, keeps only names config.py actually defines
+      AND that are used -- this kills the ImportError from blind-merged constants.
+    - Rebuilds `from X import a, b, c` with just the used subset (trims residue
+      like `TypedDict, Annotated`). De-duplicates.
+    """
+    config_consts = set(config_consts or ())
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in lines:
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        try:
+            node = ast.parse(line.strip()).body[0]
+        except (SyntaxError, IndexError):
+            continue
+        if isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod == "__future__":
+                continue
+            if mod.split(".")[0] == "langgraph":
+                continue
+            kept = []
+            for a in node.names:
+                bound = a.asname or a.name
+                if bound not in used:
+                    continue
+                if mod == "config" and a.name not in config_consts:
+                    continue  # config.py never defines this -> would ImportError
+                kept.append(a.name if not a.asname else f"{a.name} as {a.asname}")
+            if not kept:
+                continue
+            rebuilt = f"from {mod} import {', '.join(kept)}"
+        elif isinstance(node, ast.Import):
+            kept_aliases = []
+            for a in node.names:
+                if a.name.split(".")[0] == "langgraph":
+                    continue
+                bound = a.asname or a.name.split(".")[0]
+                if bound in used:
+                    kept_aliases.append(a.name if not a.asname else f"{a.name} as {a.asname}")
+            if not kept_aliases:
+                continue
+            rebuilt = f"import {', '.join(kept_aliases)}"
+        else:
+            continue
+        if rebuilt not in seen:
+            seen.add(rebuilt)
+            out.append(rebuilt)
+    return "\n".join(out)
+
+
+def _curate_preamble(preamble: list[str], used: set[str], available: set[str]) -> str:
+    """Keep module-level preamble lines that are safe and actually used.
+
+    A line is kept only if it assigns a name used in the body AND every name it
+    references is resolvable (imported, a builtin, or defined earlier). This drops
+    blindly-merged junk like `_default = VectorStore()` (VectorStore not imported)
+    and a stray `app = FastAPI(...)` (unused), which caused NameErrors at import.
+    """
+    resolvable = set(available) | set(_BUILTIN_NAMES)
+    out: list[str] = []
+    block = "\n".join(preamble)
+    try:
+        tree = ast.parse(block)
+    except SyntaxError:
+        return ""  # can't reason about it safely -> drop rather than break import
+    for stmt in tree.body:
+        targets: list[str] = []
+        if isinstance(stmt, ast.Assign):
+            for t in stmt.targets:
+                if isinstance(t, ast.Name):
+                    targets.append(t.id)
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            targets.append(stmt.target.id)
+        else:
+            continue
+        if not targets or not any(t in used for t in targets):
+            continue
+        refs = {
+            n.id for n in ast.walk(stmt)
+            if isinstance(n, ast.Name) and n.id not in targets
+        }
+        if not refs <= resolvable:
+            continue
+        out.append(ast.unparse(stmt))
+        resolvable.update(targets)
     return "\n".join(out)
 
 
@@ -332,7 +520,7 @@ def _rewrite_support_module(source: str, source_root: str | None) -> str:
     tree = ast.parse(source)
     _ImportRewriter(source_root).visit(tree)
     ast.fix_missing_locations(tree)
-    return ast.unparse(tree)
+    return _rewrite_path_anchors(ast.unparse(tree), source_root)
 
 
 def _state_param(ir: IR) -> str:
@@ -391,6 +579,13 @@ def _comment_lines(src: str, indent: int = 4) -> str:
     return "\n".join(out)
 
 
+def _audit_append(node_name: str, event: str, has_audit_helper: bool, indent: str) -> str:
+    """One audit_log.append(...) line -- via the source audit() helper if present."""
+    if has_audit_helper:
+        return f'{indent}ctx.audit_log.append(audit("{node_name}", "{event}"))'
+    return f'{indent}ctx.audit_log.append({{"node": "{node_name}", "event": "{event}"}})'
+
+
 def _hitl_block(
     ir: IR,
     node,
@@ -398,50 +593,69 @@ def _hitl_block(
     ctx_class: str,
     has_audit_log: bool,
 ) -> str:
-    """HITL node: active AUTO-APPROVE + a commented-out real approval flow.
+    """HITL node with a REAL, opt-in human pause + an auto-approve default.
 
-    The agent runs end-to-end today (auto-approve). To enforce real human
-    approval, the user deletes the auto-approve lines and uncomments the block --
-    which holds the Gemini-generated flow (llm mode) or the original/template
-    flow (manual mode).
+    Default (`HITL_MODE=auto`): auto-approves so the agent runs end-to-end.
+    `HITL_MODE=file`: writes `<node>.request.json`, waits for `<node>.response.json`
+    (a dict of state updates), applies it, and continues -- a genuine "LLM writes,
+    human reviews" pause with no extra infrastructure. Times out to auto-approve
+    after HITL_TIMEOUT_SECONDS. The source/Gemini-suggested approval logic is kept
+    as a reference comment to fold into the file-mode branch.
     """
-    header = f"def {node.name}(ctx: {ctx_class}) -> {ctx_class}:"
+    name = node.name
+    has_audit_helper = "audit" in ir.functions
+    appr = _audit_append(name, "human_approved", has_audit_helper, "                ") if has_audit_log else "                pass"
+    tmo = _audit_append(name, "timeout_auto_approved", has_audit_helper, "        ") if has_audit_log else "        pass"
+    auto = _audit_append(name, "auto_approved", has_audit_helper, "    ") if has_audit_log else "    pass"
 
-    active = [
-        "    # AUTO-APPROVE (prototype): keeps the agent runnable without a human.",
-        "    # To enforce real human approval, delete the auto-approve lines below",
-        '    # and uncomment the "REAL HUMAN APPROVAL" block underneath.',
+    body = [
+        f"def {name}(ctx: {ctx_class}) -> {ctx_class}:",
+        '    """Human-in-the-loop node (converted).',
+        "",
+        "    Default auto-approves (HITL_MODE=auto) so the agent runs end-to-end.",
+        f"    Set HITL_MODE=file for a real review: writes {name}.request.json, waits",
+        f"    for {name}.response.json (a dict of state updates), applies it, continues.",
+        '    """',
+        '    import os',
+        '    if os.environ.get("HITL_MODE", "auto").lower() == "file":',
+        "        import json, pathlib, time",
+        f'        _req = pathlib.Path("{name}.request.json")',
+        f'        _resp = pathlib.Path("{name}.response.json")',
+        "        _snap = {f: getattr(ctx, f, None) for f in type(ctx).model_fields}",
+        "        _req.write_text(json.dumps(_snap, indent=2, default=str))",
+        "        for _ in range(HITL_TIMEOUT_SECONDS):",
+        "            if _resp.exists():",
+        "                _decision = json.loads(_resp.read_text())",
+        "                _resp.unlink()",
+        "                for _k, _v in _decision.items():",
+        "                    setattr(ctx, _k, _v)",
+        appr,
+        "                return ctx",
+        "            time.sleep(1)",
+        tmo,
+        "        return ctx",
+        auto,
+        "    return ctx",
     ]
-    if has_audit_log:
-        active.append(
-            f"    ctx.audit_log.append(\"auto-approved: '{node.name}' "
-            "(no human in the loop)\")"
-        )
-    active.append("    return ctx")
 
     if unit and unit.generated_code:
         real_src = unit.generated_code.rstrip()
-        origin = "Gemini-generated; review then uncomment"
+        origin = "Gemini-suggested approval logic; fold into the HITL_MODE=file branch"
     else:
-        # Manual: emit a HumanApprovalRequired template (NOT the raw source, which
-        # would reintroduce interrupt()/langgraph tokens). The original logic is
-        # recorded in MIGRATION_REPORT.md for reference.
         real_src = (
-            'if not getattr(ctx, "approved", False):\n'
-            f'    raise HumanApprovalRequired({{"node": "{node.name}"}})\n'
-            "# on resume, the caller sets the decision on ctx and returns ctx\n"
-            "# (the original approval logic is in MIGRATION_REPORT.md)"
+            "# The source's real approval logic is recorded in MIGRATION_REPORT.md.\n"
+            "# Apply the human decision to ctx (the file-mode branch above shows how),\n"
+            "# e.g. set the approved fields from _decision, then return ctx."
         )
-        origin = "manual: implement, then uncomment"
+        origin = "reference: implement in the HITL_MODE=file branch"
 
     return "\n".join(
-        [
-            header,
-            "\n".join(active),
+        body
+        + [
             "",
-            f"    # --- REAL HUMAN APPROVAL ({origin}) ---",
-            _comment_lines(real_src, indent=4),
-            "    # --- end real human approval ---",
+            f"# --- HUMAN APPROVAL REFERENCE for '{name}' ({origin}) ---",
+            _comment_lines(real_src, indent=0),
+            "# --- end human approval reference ---",
         ]
     )
 
@@ -597,6 +811,288 @@ def _run_block(ir: IR, workflow_unit: Optional[ConversionUnit]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Phases 4-5 -- true MAF WorkflowBuilder graph (executors + guarded edges)
+# ---------------------------------------------------------------------------
+
+_SENTINEL_NODES = frozenset({"START", "END", "__start__", "__end__"})
+
+
+def _executor_name(node_name: str) -> str:
+    return f"{node_name}_exec"
+
+
+def _maf_back_edges(adjacency: dict[str, set[str]], entry: Optional[str]) -> set[tuple[str, str]]:
+    """DFS back-edges (u -> v where v is an ancestor on the DFS stack)."""
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {n: WHITE for n in adjacency}
+    back: set[tuple[str, str]] = set()
+
+    def visit(u: str) -> None:
+        color[u] = GRAY
+        for v in adjacency.get(u, ()):
+            if color.get(v, WHITE) == GRAY:
+                back.add((u, v))
+            elif color.get(v, WHITE) == WHITE:
+                visit(v)
+        color[u] = BLACK
+
+    roots = [entry] if entry and entry in adjacency else []
+    roots += [n for n in adjacency if n not in roots]
+    for root in roots:
+        if color.get(root, WHITE) == WHITE:
+            visit(root)
+    return back
+
+
+def _maf_edge_tuples(wf) -> list[tuple]:
+    """(source, target, condition_label, router, is_loop) for the MAF graph.
+
+    Prefers the IR's pre-flattened `flat_edges` (populated by build_ir); falls
+    back to deriving them from edges/conditional_edges so a hand-built IR (or any
+    caller that skips build_ir) still produces a correct graph.
+    """
+    if wf.flat_edges:
+        return [
+            (e.source, e.target, e.condition_label, e.router, e.is_loop)
+            for e in wf.flat_edges
+        ]
+    raw: list[tuple] = []
+    adjacency: dict[str, set[str]] = {}
+
+    def _adj(src: str, tgt: str) -> None:
+        if src not in _SENTINEL_NODES and tgt not in _SENTINEL_NODES:
+            adjacency.setdefault(src, set()).add(tgt)
+
+    for edge in wf.edges:
+        raw.append((edge.source, edge.target, None, None))
+        _adj(edge.source, edge.target)
+    for cond in wf.conditional_edges:
+        for label, tgt in cond.outcomes.items():
+            raw.append((cond.source, tgt, label, cond.router))
+            _adj(cond.source, tgt)
+    back = _maf_back_edges(adjacency, wf.entry_point)
+    return [(s, t, lbl, r, (s, t) in back) for (s, t, lbl, r) in raw]
+
+
+def _pascal(name: str) -> str:
+    return "".join(p.capitalize() for p in re.split(r"[_\W]+", name) if p)
+
+
+def _maf_workflow_block(ir: IR, adapter: TargetAdapter) -> str:
+    """Emit the true MAF graph: executors + guarded WorkflowBuilder + tools + HITL.
+
+    Phase 4: each node becomes a pure `node(state)->State` fn (already emitted)
+    wrapped in an `@executor` that `ctx.send_message(...)`s the new state; terminal
+    nodes `ctx.yield_output(...)`. Phase 5: every conditional outcome becomes a
+    guarded `.add_edge(src, tgt, condition=...)`, loop back-edges included.
+    Phase 6: the converted tools are registered (AGENT_TOOLS / NODE_TOOLS) so none
+    are orphaned, and a ChatAgent is wired for single-agent mode. Phase 7: each
+    HITL node has a real RequestInfoExecutor pause path alongside an auto-approve
+    fast-path (AUTO_APPROVE_HITL), and checkpointing is enabled when the source
+    used a saver. The whole block is SDK-guarded so the offline `run()` above keeps
+    the agent runnable when agent-framework is absent.
+    """
+    wf = ir.workflow
+    if not wf or not wf.nodes:
+        return ""
+    ctx_class = adapter.context_class_name
+    roles = {n.name: n.role for n in wf.nodes}
+    nodes = [n for n in wf.nodes if roles.get(n.name) is not NodeRole.AUX]
+    if not nodes:
+        return ""
+    real_names = {n.name for n in nodes}
+    hitl_names = [n.name for n in nodes if roles.get(n.name) is NodeRole.HITL]
+    hitl_payload = {h.node: h.payload for h in (wf.hitl_points or [])}
+
+    edge_tuples = _maf_edge_tuples(wf)
+    succ: dict[str, list[tuple]] = {}
+    for tup in edge_tuples:
+        succ.setdefault(tup[0], []).append(tup)
+
+    # Phase 6: register EVERY converted tool (so none is emitted-but-never-wired),
+    # plus the node->tool mapping for the tools each node actually calls.
+    node_tools = {n.name: sorted(n.calls_tools) for n in nodes if n.calls_tools}
+    all_tools = sorted({t.name for t in ir.tools})
+
+    single_agent = ir.metadata.orchestration_mode is OrchestrationMode.SINGLE_AGENT
+    has_checkpointer = bool(ir.metadata.checkpointer)
+
+    imports = ["WorkflowBuilder", "WorkflowContext", "executor"]
+    if hitl_names:
+        imports += ["RequestInfoExecutor", "RequestInfoMessage"]
+    if single_agent and all_tools:
+        imports.append("ChatAgent")
+    if has_checkpointer:
+        imports.append("FileCheckpointStorage")
+
+    out: list[str] = [
+        "# --- True Microsoft Agent Framework workflow (Phases 4-7) ---",
+        "# Generated from the IR graph: one @executor per node, guarded edges per",
+        "# router outcome, tools registered, HITL via RequestInfoExecutor. Requires",
+        "# the agent-framework SDK; when it is absent, run(ctx) above is the offline",
+        "# fast-path over the same pure node functions.",
+        "try:",
+        "    from agent_framework import " + ", ".join(sorted(set(imports))),
+        "    _HAVE_AGENT_FRAMEWORK = True",
+        "except ImportError:  # pragma: no cover - SDK provided at deploy time",
+        "    _HAVE_AGENT_FRAMEWORK = False",
+    ]
+    if hitl_names:
+        out += [
+            "",
+            "",
+            "# Phase 7 switch: True auto-approves (runs end-to-end, no human); False",
+            "# triggers a genuine human pause via RequestInfoExecutor. Both are wired.",
+            "AUTO_APPROVE_HITL = True",
+        ]
+    out += ["", "", "if _HAVE_AGENT_FRAMEWORK:", ""]
+
+    if hitl_names:
+        out.append("    from dataclasses import dataclass, field")
+        out.append("")
+
+    # Phase 6: register tools (executors call them directly per NODE_TOOLS).
+    if all_tools:
+        out.append("    # Phase 6: converted tools, registered so none are orphaned. Executors")
+        out.append("    # call them directly per the IR node->tool mapping (NODE_TOOLS below);")
+        out.append("    # AGENT_TOOLS also feeds a ChatAgent for single-agent mode.")
+        out.append(f"    AGENT_TOOLS = [{', '.join(all_tools)}]")
+        pairs = ", ".join(f'"{n}": [{", ".join(ts)}]' for n, ts in node_tools.items())
+        out.append("    NODE_TOOLS = {" + pairs + "}")
+        out.append("")
+
+    # Phase 7: one human-approval request message per HITL node.
+    for hn in hitl_names:
+        cls = _pascal(hn) + "Request"
+        out.append("    @dataclass")
+        out.append(f"    class {cls}(RequestInfoMessage):")
+        out.append(f'        """Human-approval request emitted by node \'{hn}\'."""')
+        out.append("        # payload carries the approval context (source shape in MIGRATION_REPORT.md).")
+        out.append("        payload: dict = field(default_factory=dict)")
+        out.append("")
+
+    # Executors (Phase 4 + Phase 7 HITL branch).
+    for node in nodes:
+        name = node.name
+        exec_name = _executor_name(name)
+        outs = succ.get(name, [])
+        real_outs = [t for t in outs if t[1] not in _SENTINEL_NODES and t[1] in real_names]
+        end_outs = [t for t in outs if t[1] in _SENTINEL_NODES]
+        router = next((t[3] for t in outs if t[3]), None)
+        out.append(f'    @executor(id="{name}")')
+        out.append(
+            f"    async def {exec_name}(state: {ctx_class}, "
+            f"ctx: WorkflowContext[{ctx_class}]) -> None:"
+        )
+        out.append(f'        """Executor for node \'{name}\' (wraps the ported node fn)."""')
+        if name in hitl_names:
+            cls = _pascal(name) + "Request"
+            out.append("        if AUTO_APPROVE_HITL:")
+            out.append(f"            await ctx.send_message({name}(state))  # fast-path (auto-approve)")
+            out.append("        else:")
+            out.append(
+                f'            await ctx.send_message({cls}(payload={{"node": "{name}"}}))'
+                "  # genuine human pause"
+            )
+        else:
+            out.append(f"        result = {name}(state)")
+            if end_outs and real_outs and router and end_outs[0][2]:
+                end_label = end_outs[0][2]
+                out.append(f'        if {router}(result) == "{end_label}":')
+                out.append("            await ctx.yield_output(result)")
+                out.append("        else:")
+                out.append("            await ctx.send_message(result)")
+            elif real_outs and not (roles.get(name) is NodeRole.TERMINAL):
+                out.append("        await ctx.send_message(result)")
+            else:
+                out.append("        await ctx.yield_output(result)")
+        out.append("")
+
+    # Phase 7: apply-executor + RequestInfoExecutor instance for HITL.
+    for hn in hitl_names:
+        out.append(f'    @executor(id="{hn}_apply")')
+        out.append(
+            f"    async def {hn}_apply_exec(response, "
+            f"ctx: WorkflowContext[{ctx_class}]) -> None:"
+        )
+        out.append(f'        """Apply the human decision for \'{hn}\', then continue."""')
+        out.append("        # `response` is the human reply gathered by RequestInfoExecutor.")
+        out.append("        # Merge the decision into the checkpointed state and continue")
+        out.append("        # (implement the real approval logic; see MIGRATION_REPORT.md).")
+        out.append(f"        await ctx.send_message({hn}(response))")
+        out.append("")
+    if hitl_names:
+        out.append('    _request_info_exec = RequestInfoExecutor(id="request_info")')
+        out.append("")
+
+    # Phase 6: single tool-using agent (ChatAgent) for single-agent mode.
+    if single_agent and all_tools:
+        out.append("    def build_agent():")
+        out.append('        """Single tool-using agent: converted tools wired onto a ChatAgent."""')
+        out.append("        # TODO: pass your chat client (LLM provider). Tools are wired here.")
+        out.append("        return ChatAgent(chat_client=None, tools=AGENT_TOOLS)")
+        out.append("")
+
+    # build_workflow (Phase 5 edges + Phase 7 HITL wiring + checkpointing).
+    entry = wf.entry_point if wf.entry_point in real_names else nodes[0].name
+    out.append("    def build_workflow():")
+    out.append('        """Assemble the MAF workflow graph (Phase 8 wiring)."""')
+    out.append(
+        f"        builder = WorkflowBuilder().set_start_executor({_executor_name(entry)})"
+    )
+    for source, target, label, router, is_loop in edge_tuples:
+        if source in _SENTINEL_NODES or target in _SENTINEL_NODES:
+            continue
+        if source not in real_names or target not in real_names:
+            continue
+        if source in hitl_names:
+            continue  # HITL sources wired in the HITL section below
+        src_x = _executor_name(source)
+        tgt_x = _executor_name(target)
+        if label and router:
+            suffix = "  # loop back-edge" if is_loop else ""
+            out.append(
+                f"        builder.add_edge({src_x}, {tgt_x}, "
+                f'condition=lambda s, _r={router}, _l="{label}": '
+                f"_r(s) == _l){suffix}"
+            )
+        else:
+            out.append(f"        builder.add_edge({src_x}, {tgt_x})")
+    for hn in hitl_names:
+        succs = [
+            t for (s, t, _l, _r, _lp) in edge_tuples
+            if s == hn and t in real_names and t not in _SENTINEL_NODES
+        ]
+        hx = _executor_name(hn)
+        out.append(f"        # HITL '{hn}': fast-path continues directly; pause routes via RequestInfoExecutor.")
+        out.append("        if AUTO_APPROVE_HITL:")
+        if succs:
+            for sc in succs:
+                out.append(f"            builder.add_edge({hx}, {_executor_name(sc)})")
+        else:
+            out.append("            pass")
+        out.append("        else:")
+        out.append(f"            builder.add_edge({hx}, _request_info_exec)")
+        out.append(f"            builder.add_edge(_request_info_exec, {hn}_apply_exec)")
+        if succs:
+            for sc in succs:
+                out.append(f"            builder.add_edge({hn}_apply_exec, {_executor_name(sc)})")
+        else:
+            out.append("            pass")
+    if has_checkpointer:
+        out.append("        # Phase 7: source used a checkpointer -> enable file-based checkpointing.")
+        out.append('        builder = builder.with_checkpointing(FileCheckpointStorage("./checkpoints"))')
+    out.append("        return builder.build()")
+    out.append("")
+    out.append(f"    async def run_workflow(state: {ctx_class}):")
+    out.append('        """Run the true MAF workflow; returns its output events."""')
+    out.append("        workflow = build_workflow()")
+    out.append("        return await workflow.run(state)")
+    out.append("# --- end MAF workflow ---")
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
 # Writing + validation
 # ---------------------------------------------------------------------------
 
@@ -637,6 +1133,9 @@ _STDLIB_ROOTS = frozenset({
     "shutil", "tempfile", "base64", "secrets", "threading", "queue", "socket",
     "struct", "decimal", "statistics", "pprint", "difflib", "unittest", "signal",
     "concurrent", "urllib", "http", "xml", "html", "shlex", "getpass", "platform",
+    "zipfile", "gzip", "tarfile", "mimetypes", "fnmatch", "bisect", "heapq",
+    "weakref", "gc", "select", "errno", "stat", "posixpath", "ntpath", "unicodedata",
+    "zlib", "binascii", "codecs", "locale", "calendar", "numbers", "fractions",
 })
 # Modules the consolidated package defines itself (never a pip dependency).
 _INTERNAL_MODULES = frozenset(
@@ -744,10 +1243,15 @@ def _plugin_module_name(source_file: str | None) -> str:
     return base[:-3] if base.endswith(".py") else "skills"
 
 
-def _tool_plain_function(tool: ToolSpec) -> str:
+def _tool_plain_function(tool: ToolSpec, adapter: TargetAdapter | None = None) -> str:
     sig = tool.signature or ", ".join(p.name for p in tool.params)
     ret = f" -> {tool.returns}" if tool.returns else ""
-    lines = [f"def {tool.name}({sig}){ret}:"]
+    lines: list[str] = []
+    # Function-style targets (e.g. MAF @ai_function) decorate the function itself,
+    # so it IS the registered tool -- no separate wrapper class needed.
+    if adapter is not None and adapter.tool_style() == "function":
+        lines.append(f"@{adapter.tool_decorator()}(description={tool.docstring or tool.name!r})")
+    lines.append(f"def {tool.name}({sig}){ret}:")
     if tool.docstring:
         lines.append(f'    """{tool.docstring}"""')
     if tool.body:
@@ -781,28 +1285,367 @@ def _plugin_module(tools: list[ToolSpec], adapter: TargetAdapter, imports_block:
     if imports_block.strip():
         parts.append(imports_block)
     parts.append("\n" + _decorator_shim(adapter))
+    function_style = adapter.tool_style() == "function"
     for tool in tools:
-        parts.append("\n" + _tool_plain_function(tool))
-    for tool in tools:
-        parts.append("\n" + _tool_plugin_class(tool, adapter))
+        parts.append("\n" + _tool_plain_function(tool, adapter))
+    # Plugin-class-style targets also emit a wrapper class; function-style targets
+    # do NOT (the decorated function above is the registered tool -- no dead class).
+    if not function_style:
+        for tool in tools:
+            parts.append("\n" + _tool_plugin_class(tool, adapter))
     return "\n".join(parts) + "\n"
 
 
-def _entrypoint(adapter: TargetAdapter, target: str) -> str:
+_SECRET_BASENAMES = frozenset({".env", ".env.local", ".env.production", "credentials", "credentials.json"})
+_SECRET_SUFFIXES = (".pem", ".key", ".pfx", ".p12")
+
+
+def _is_secret_file(rel: str) -> bool:
+    """True for files that must never be copied into the output (secrets)."""
+    base = os.path.basename(rel.replace("\\", "/")).lower()
+    if base in _SECRET_BASENAMES or base.startswith(".env"):
+        return True
+    if base.startswith("id_rsa") or base.startswith("secrets"):
+        return True
+    return base.endswith(_SECRET_SUFFIXES)
+
+
+# A fixed, per-conversion-independent stub of the `agent-framework` SDK. Generated
+# into the output as a local `agent_framework/` package so the converted MAF graph
+# BUILDS AND RUNS without the real (internal) SDK. Python resolves the local
+# package before site-packages, so `from agent_framework import ...` finds this.
+# When the real SDK is installed, delete the folder -- it is a drop-in replacement.
+_AGENT_FRAMEWORK_STUB = '''"""Local stub of the Microsoft Agent Framework (`agent-framework`) SDK.
+
+Auto-generated by the Framework Conversion Utility. This is NOT the real SDK --
+it implements just enough of the interface (pure-Python async) that the converted
+agent\\'s MAF workflow builds and runs offline. Python resolves this local package
+before site-packages, so `from agent_framework import ...` finds this stub. When
+the real SDK is installed, delete this folder -- it is a drop-in replacement and
+nothing else in the converted package changes.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable
+
+
+# --- Events -------------------------------------------------------------
+@dataclass
+class WorkflowOutputEvent:
+    data: Any = None
+
+
+@dataclass
+class WorkflowStatusEvent:
+    state: Any = None
+
+
+@dataclass
+class RequestInfoEvent:
+    request_id: str = ""
+    data: Any = None
+
+
+# --- Human-in-the-loop --------------------------------------------------
+@dataclass
+class RequestInfoMessage:
+    """Base for HITL request payloads (the agent subclasses this)."""
+    request_id: str = ""
+
+
+class RequestInfoExecutor:
+    """Stub: would gather human input. In this stub HITL never actually pauses."""
+
+    def __init__(self, id: str = "request_info", **kwargs: Any) -> None:
+        self.id = id
+
+
+# --- Checkpointing ------------------------------------------------------
+class FileCheckpointStorage:
+    def __init__(self, path: str = "./checkpoints", **kwargs: Any) -> None:
+        self.path = path
+
+
+# --- Tool decorator -----------------------------------------------------
+def ai_function(*args: Any, **kwargs: Any):
+    """No-op tool decorator. Supports both `@ai_function` and `@ai_function(...)`."""
+    if args and callable(args[0]) and not kwargs:
+        return args[0]
+
+    def _wrap(fn: Callable) -> Callable:
+        return fn
+
+    return _wrap
+
+
+# --- Single-agent mode --------------------------------------------------
+class ChatAgent:
+    def __init__(self, chat_client: Any = None, tools: Any = None, **kwargs: Any) -> None:
+        self.chat_client = chat_client
+        self.tools = list(tools or [])
+        self.kwargs = kwargs
+
+    async def run(self, *args: Any, **kwargs: Any) -> Any:
+        return None
+
+
+# --- Executor + context -------------------------------------------------
+class WorkflowContext:
+    """Runtime context passed to each executor; also usable as a type hint."""
+
+    def __init__(self) -> None:
+        self.messages: list = []
+        self.outputs: list = []
+
+    def __class_getitem__(cls, item):  # allow WorkflowContext[State] annotations
+        return cls
+
+    async def send_message(self, message: Any) -> None:
+        self.messages.append(message)
+
+    async def yield_output(self, data: Any) -> None:
+        self.outputs.append(data)
+
+
+def executor(id: Any = None, **kwargs: Any):
+    """Register an async function as a workflow node.
+
+    Supports `@executor(id="x")` and bare `@executor`. Returns the function with
+    an `.id` attribute so it can act as a node identity in the builder.
+    """
+    def _wrap(fn: Callable) -> Callable:
+        fn.id = id if isinstance(id, str) else getattr(fn, "__name__", "executor")
+        fn._is_executor = True
+        return fn
+
+    if callable(id):  # bare @executor
+        return _wrap(id)
+    return _wrap
+
+
+# --- Workflow -----------------------------------------------------------
+class _Workflow:
+    def __init__(self, start, edges, checkpoint=None, max_steps: int = 10000) -> None:
+        self._start = start
+        self._edges = edges  # list of (source, target, condition-or-None)
+        self._checkpoint = checkpoint
+        self._max_steps = max_steps
+
+    async def _drive(self, state: Any) -> list:
+        events: list = []
+        if self._start is None:
+            return events
+        queue = [(self._start, state)]
+        steps = 0
+        while queue and steps < self._max_steps:
+            steps += 1
+            node, message = queue.pop(0)
+            ctx = WorkflowContext()
+            await node(message, ctx)
+            for out in ctx.outputs:
+                events.append(WorkflowOutputEvent(data=out))
+            for msg in ctx.messages:
+                for source, target, condition in self._edges:
+                    if source is node:
+                        try:
+                            ok = condition is None or bool(condition(msg))
+                        except Exception:
+                            ok = False
+                        if ok:
+                            queue.append((target, msg))
+        return events
+
+    async def run(self, state: Any) -> Any:
+        events = await self._drive(state)
+        return events[-1].data if events else state
+
+    async def run_stream(self, state: Any):
+        for event in await self._drive(state):
+            yield event
+
+    async def send_responses_streaming(self, responses: Any):
+        # HITL never pauses in this stub, so there is nothing to resume.
+        if False:  # pragma: no cover
+            yield None
+        return
+
+
+class WorkflowBuilder:
+    def __init__(self) -> None:
+        self._start = None
+        self._edges: list = []
+        self._checkpoint = None
+
+    def set_start_executor(self, ex):
+        self._start = ex
+        return self
+
+    def add_edge(self, source, target, condition=None):
+        self._edges.append((source, target, condition))
+        return self
+
+    def with_checkpointing(self, storage):
+        self._checkpoint = storage
+        return self
+
+    def build(self):
+        return _Workflow(self._start, self._edges, self._checkpoint)
+
+    # --- LangGraph-style compatibility aliases --------------------------
+    def set_entry_point(self, ex):
+        self._start = ex
+        return self
+
+    def set_finish_point(self, ex):
+        return self
+
+    def add_node(self, name, fn=None):
+        return self
+
+    def add_conditional_edges(self, source, router, mapping):
+        for label, target in dict(mapping).items():
+            self._edges.append((source, target, (lambda m, _r=router, _l=label: _r(m) == _l)))
+        return self
+
+    def compile(self):
+        return self.build()
+
+
+__all__ = [
+    "WorkflowBuilder",
+    "WorkflowContext",
+    "executor",
+    "RequestInfoExecutor",
+    "RequestInfoMessage",
+    "RequestInfoEvent",
+    "WorkflowOutputEvent",
+    "WorkflowStatusEvent",
+    "FileCheckpointStorage",
+    "ChatAgent",
+    "ai_function",
+]
+'''
+
+
+def _smoke_test(adapter: TargetAdapter, target: str) -> str:
+    """A minimal offline-safe smoke test for the converted package."""
     ctx = adapter.context_class_name
     return (
-        f'"""Generated entrypoint for the converted {target} agent."""\n'
-        "from __future__ import annotations\n\n"
+        f'"""Smoke test for the converted {target} agent (offline-safe)."""\n\n'
         f"from agent_context import {ctx}\n"
-        "from orchestrator import run\n\n\n"
-        "def main():\n"
-        f"    ctx = {ctx}()\n"
-        "    ctx = run(ctx)\n"
-        "    print(ctx)\n"
-        "    return ctx\n\n\n"
-        'if __name__ == "__main__":\n'
-        "    main()\n"
+        "import orchestrator\n\n\n"
+        "def test_state_constructs():\n"
+        f"    assert {ctx}() is not None\n\n\n"
+        "def test_offline_entrypoint_present():\n"
+        '    """The offline fast-path run() must exist even without the MAF SDK."""\n'
+        '    assert callable(getattr(orchestrator, "run", None))\n\n\n'
+        "def test_state_advance_returns_new_instance():\n"
+        f"    a = {ctx}()\n"
+        "    b = a.advance()\n"
+        f"    assert isinstance(b, {ctx}) and b is not a\n"
     )
+
+
+def _entrypoint(ir: IR, adapter: TargetAdapter, target: str) -> str:
+    """Phase 9 entrypoint.
+
+    Drives the true MAF workflow with `run_stream` + `send_responses_streaming`
+    (handling HITL RequestInfoEvents until a WorkflowOutputEvent), and falls back
+    to the offline `run()` when agent-framework is absent. When the source exposed
+    a web app, a FastAPI endpoint + uvicorn runner is emitted; otherwise a CLI.
+    """
+    ctx = adapter.context_class_name
+    is_api = (ir.metadata.entrypoint or "cli") == "api"
+
+    lines: list[str] = [
+        f'"""Generated entrypoint for the converted {target} agent."""',
+        "from __future__ import annotations",
+        "",
+        "import asyncio",
+        f"from agent_context import {ctx}",
+        "from orchestrator import run",
+        "",
+        "try:",
+        "    from orchestrator import build_workflow",
+        "    from agent_framework import WorkflowOutputEvent, RequestInfoEvent",
+        "    _HAVE_AGENT_FRAMEWORK = True",
+        "except ImportError:  # pragma: no cover - SDK provided at deploy time",
+        "    _HAVE_AGENT_FRAMEWORK = False",
+        "",
+        "",
+        "def _respond_to(event) -> dict:",
+        '    """Human response for one HITL request. Default approves; wire real input here."""',
+        '    return {"approved": True}',
+        "",
+        "",
+        f"async def run_workflow_stream(state: {ctx}):",
+        '    """Phase 9: drive the MAF workflow, resolving HITL requests until output."""',
+        "    workflow = build_workflow()",
+        "    result = None",
+        "    stream = workflow.run_stream(state)",
+        "    while True:",
+        "        responses = {}",
+        "        async for event in stream:",
+        "            if isinstance(event, WorkflowOutputEvent):",
+        "                result = event.data",
+        "            elif isinstance(event, RequestInfoEvent):",
+        "                responses[event.request_id] = _respond_to(event)",
+        "        if not responses:",
+        "            break",
+        "        # Resume the halted workflow with the collected human responses.",
+        "        stream = workflow.send_responses_streaming(responses)",
+        "    return result",
+        "",
+        "",
+        f"def run_agent(state: {ctx} | None = None):",
+        '    """Run via the MAF workflow when the SDK is present, else offline run()."""',
+        f"    state = state or {ctx}()",
+        "    if _HAVE_AGENT_FRAMEWORK:",
+        "        return asyncio.run(run_workflow_stream(state))",
+        "    return run(state)  # offline fast-path",
+        "",
+        "",
+    ]
+
+    if is_api:
+        lines += [
+            "from fastapi import FastAPI",
+            "import uvicorn",
+            "",
+            "app = FastAPI()",
+            "",
+            "",
+            '@app.post("/run")',
+            "async def run_endpoint(payload: dict | None = None):",
+            '    """Run the agent; converted from the source API entrypoint."""',
+            f"    state = {ctx}(**(payload or {{}}))",
+            "    result = run_agent(state)",
+            "    return result",
+            "",
+            "",
+            "def main():",
+            '    uvicorn.run(app, host="0.0.0.0", port=8000)',
+            "",
+            "",
+            'if __name__ == "__main__":',
+            "    main()",
+            "",
+        ]
+    else:
+        lines += [
+            "def main():",
+            "    result = run_agent()",
+            "    print(result)",
+            "    return result",
+            "",
+            "",
+            'if __name__ == "__main__":',
+            "    main()",
+            "",
+        ]
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -842,7 +1685,10 @@ def generate(
             rel = os.path.join("plugins", f"{mod}.py")
             content = _plugin_module(tools, adapter, imports_block)
             _write_python(result, rel, content)
-            _validate_target(result, rel, content, [adapter.tool_decorator(), "class "])
+            must = [adapter.tool_decorator()]
+            if adapter.tool_style() != "function":
+                must.append("class ")
+            _validate_target(result, rel, content, must)
             names = ", ".join(sorted({t.name for t in tools}))
             tool_import_lines.append(f"from plugins.{mod} import {names}")
 
@@ -850,10 +1696,12 @@ def generate(
     fields_block = (
         "\n".join(_state_field_decl(f) for f in ir.state) if ir.state else "    pass"
     )
+    append_only = sorted(_append_only(ir))
     ctx_rendered = env.get_template("agent_context.py.jinja").render(
         context_class=adapter.context_class_name,
         fields_block=fields_block,
         typing_imports=_typing_imports(ir),
+        reducer_fields=(repr(set(append_only)) if append_only else "set()"),
     )
     aliases = [
         f"{name} = {adapter.context_class_name}"
@@ -867,7 +1715,7 @@ def generate(
             + "\n"
         )
     _write_python(result, "agent_context.py", ctx_rendered)
-    _validate_target(result, "agent_context.py", ctx_rendered, ["@dataclass"])
+    _validate_target(result, "agent_context.py", ctx_rendered, ["BaseModel", "def advance"])
 
     # 3. config.py from carried constants.
     if ir.config.constants:
@@ -880,12 +1728,33 @@ def generate(
     workflow_unit = next(
         (u for u in conversion.units if u.source_ref == "workflow"), None
     )
-    has_hitl = any(u.rule_id == "R-08" for u in conversion.units)
+    has_hitl = any(u.rule_id == "R-08" for u in conversion.units) or any(
+        n.role is NodeRole.HITL for n in (ir.workflow.nodes if ir.workflow else [])
+    )
     has_checkpointer = any(u.rule_id == "R-15" for u in conversion.units)
-    extra_defs_parts = []
+    # Runtime helper: applies a node's returned dict of state updates onto ctx.
+    # Makes nodes that `return out` / `return {**state, ...}` work as ctx-returning
+    # functions without per-node data-flow analysis.
+    append_only_names = sorted(_append_only(ir))
+    extra_defs_parts = [
+        "\n\n_REDUCER_FIELDS = " + (repr(set(append_only_names)) if append_only_names else "set()"),
+        "\n\n\ndef _apply_updates(ctx, updates):\n"
+        '    """Apply a node\'s returned {field: value} dict onto the context object."""\n'
+        "    if updates is ctx or not isinstance(updates, dict):\n"
+        "        return ctx\n"
+        "    for _k, _v in updates.items():\n"
+        "        _cur = getattr(ctx, _k, None)\n"
+        "        if _k in _REDUCER_FIELDS and isinstance(_cur, list):\n"
+        "            _cur.extend(_v if isinstance(_v, list) else [_v])\n"
+        "        else:\n"
+        "            setattr(ctx, _k, _v)\n"
+        "    return ctx",
+    ]
     if has_hitl:
         extra_defs_parts.append(
-            "\n\nclass HumanApprovalRequired(Exception):\n"
+            "\n\n# Human-in-the-loop pause budget (seconds) for HITL_MODE=file nodes.\n"
+            "HITL_TIMEOUT_SECONDS = 600\n\n\n"
+            "class HumanApprovalRequired(Exception):\n"
             '    """Raised where the source paused for human-in-the-loop approval."""'
         )
     if has_checkpointer:
@@ -893,12 +1762,12 @@ def generate(
             "\n\n# TODO: wire persistence layer (source used a checkpointer/saver)"
         )
 
-    config_import = ""
-    if ir.config.constants:
-        config_import = "from config import " + ", ".join(ir.config.constants)
-
     helper_block = _helper_functions(ir, adapter)
     node_block = _node_functions(ir, adapter, conversion)
+    run_block = _run_block(ir, workflow_unit)
+    # Phases 4-5: the true MAF WorkflowBuilder graph (empty for Tier 3 stitched
+    # orchestration, which brings its own control flow).
+    maf_block = "" if (workflow_unit and workflow_unit.generated_code) else _maf_workflow_block(ir, adapter)
     # Names to DROP from carried imports: functions defined inline here, all node/
     # router callables (inlined under node names, imported under target_callables),
     # and graph-assembly functions (their modules are dropped, not copied).
@@ -919,32 +1788,105 @@ def generate(
         new = _rewrite_import_line(line, source_root, inlined) if source_root else line
         if new:
             rewritten.append(new)
-    orch_imports = "\n".join(dict.fromkeys([*rewritten, *tool_import_lines])).strip("\n")
+
+    # Curate the header against what the body ACTUALLY uses. This is what stops the
+    # blind-merge failures: undefined `config` constants, duplicate `__future__`,
+    # a stray FastAPI app, and `_default = VectorStore()` no longer leak in.
+    body_text = "\n\n".join([helper_block, node_block, run_block, maf_block])
+    used = _names_used(body_text)
+    used |= {"AgentContext", adapter.context_class_name, "HumanApprovalRequired"}
+
+    config_import = ""
+    if ir.config.constants:
+        needed = [n for n in ir.config.constants if n in used]
+        if needed:
+            config_import = "from config import " + ", ".join(needed)
+
+    orch_imports = _curate_imports([*rewritten, *tool_import_lines], used, ir.config.constants)
+    import_bound = {b for ln in orch_imports.splitlines() for b in _import_bound_names(ln)}
+    import_bound |= set(ir.config.constants) | {"AgentContext", adapter.context_class_name}
+    preamble = _curate_preamble(ir.preamble, used, import_bound)
 
     orch_rendered = env.get_template("orchestrator.py.jinja").render(
         context_class=adapter.context_class_name,
         config_import=config_import,
         imports=orch_imports,
-        preamble="\n".join(ir.preamble),
+        preamble=preamble,
         extra_defs="".join(extra_defs_parts),
         helper_functions=helper_block,
         node_functions=node_block,
-        run_block=_run_block(ir, workflow_unit),
+        run_block=run_block,
+        maf_workflow=maf_block,
     )
     # Final pass: rewrite any remaining function-level source imports in bodies.
     if source_root:
         orch_rendered = _rewrite_imports_in_text(orch_rendered, source_root, inlined)
+        orch_rendered = _rewrite_path_anchors(orch_rendered, source_root)
     _write_python(result, "orchestrator.py", orch_rendered)
-    _validate_target(result, "orchestrator.py", orch_rendered, ["def run"])
+    must = ["def run"]
+    if maf_block:
+        must += ["WorkflowBuilder", "@executor", "set_start_executor"]
+    _validate_target(result, "orchestrator.py", orch_rendered, must)
 
     # 5. Fresh entrypoint importing the converted modules.
-    _write_python(result, "main.py", _entrypoint(adapter, target))
+    _write_python(result, "main.py", _entrypoint(ir, adapter, target))
+
+    # 4b. A minimal smoke test so the converted package ships with a test.
+    _write_python(result, os.path.join("tests", "test_smoke.py"), _smoke_test(adapter, target))
+
+    # 4c. Local agent_framework/ stub package so the MAF graph BUILDS AND RUNS
+    #     without the real (internal) SDK. Python resolves this local package
+    #     first; delete it once the real SDK is installed (drop-in replacement).
+    _write_python(
+        result, os.path.join("agent_framework", "__init__.py"), _AGENT_FRAMEWORK_STUB
+    )
 
     # 6. requirements.txt. (generate_from_paths re-writes it after support modules
     #    are carried, so their local modules are excluded from deps.)
     _write_requirements(result, ir, adapter)
 
     return result
+
+
+def _plugin_module_from_source(
+    source: str, tools: list[ToolSpec], adapter: TargetAdapter, source_root: str | None
+) -> str:
+    """Build a plugin module from the tool file's FULL source.
+
+    Unlike the stripped version, this keeps the module's classes, module-level
+    singletons (e.g. `_default = VectorStore()`), and private helpers -- so the
+    tool functions' dependencies still resolve -- while rewriting `src.*` imports
+    and decorating the public tool functions (function-style targets).
+    """
+    tree = ast.parse(source)
+    _ImportRewriter(source_root).visit(tree)
+    ast.fix_missing_locations(tree)
+
+    tool_by_name = {t.name: t for t in tools}
+    function_style = adapter.tool_style() == "function"
+    if function_style:
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in tool_by_name:
+                desc = tool_by_name[node.name].docstring or node.name
+                dec = ast.parse(
+                    f"{adapter.tool_decorator()}(description={desc!r})"
+                ).body[0].value
+                node.decorator_list.insert(0, dec)
+        ast.fix_missing_locations(tree)
+
+    future = "from __future__ import annotations"
+    body_lines = [ln for ln in ast.unparse(tree).splitlines() if ln.strip() != future]
+    parts = [
+        '"""Generated tools (converted from source tool functions)."""',
+        future,
+        _decorator_shim(adapter),
+    ]
+    # Plugin-class-style targets still append wrapper classes for their tools.
+    tail = ""
+    if not function_style:
+        tail = "\n\n" + "\n\n".join(_tool_plugin_class(t, adapter) for t in tools)
+    module = "\n".join(parts) + "\n\n" + "\n".join(body_lines) + tail + "\n"
+    return _rewrite_path_anchors(module, source_root)
 
 
 def _stripped_output_path(rel: str, source_root: str | None) -> str:
@@ -984,6 +1926,32 @@ def generate_from_paths(
     state_names = set(ir.state_class_names)
     skip_basenames = {"README.md", "requirements.txt"}  # regenerated
 
+    # Regenerate each plugin module from its FULL source so module-level classes
+    # and singletons the tool functions rely on are preserved (fixes NameErrors
+    # like `_default = VectorStore()` missing from the stripped plugin module).
+    adapter = adapter or get_target_adapter(ir.metadata.target_framework or "maf")
+    tools_by_file: dict[str, list[ToolSpec]] = {}
+    for tool in ir.tools:
+        if tool.source_file:
+            tools_by_file.setdefault(tool.source_file, []).append(tool)
+    for source_file, tools in tools_by_file.items():
+        src = os.path.join(input_root, source_file)
+        if not os.path.exists(src):
+            continue
+        try:
+            full = _plugin_module_from_source(
+                open(src, encoding="utf-8").read(), tools, adapter, source_root
+            )
+        except SyntaxError:
+            continue
+        out_rel = os.path.join("plugins", f"{_plugin_module_name(source_file)}.py")
+        # Overwrite the stripped plugin module written by generate().
+        if out_rel.replace("\\", "/") in {p.replace("\\", "/") for p in result.written_files}:
+            result.written_files.remove(
+                next(p for p in result.written_files if p.replace("\\", "/") == out_rel.replace("\\", "/"))
+            )
+        _write_python(result, out_rel, full)
+
     for entry in ir.files:
         rel = entry.relative_path
         segs = rel.replace("\\", "/").split("/")
@@ -994,6 +1962,8 @@ def generate_from_paths(
             # Neutral asset (prompts, etc.) -- copy verbatim, stripping src/.
             if os.path.basename(rel) in skip_basenames:
                 continue
+            if _is_secret_file(rel):
+                continue  # never copy secrets (.env, keys, credentials) into output
             src = os.path.join(input_root, rel)
             if not os.path.exists(src):
                 continue

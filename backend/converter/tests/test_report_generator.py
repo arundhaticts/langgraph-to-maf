@@ -46,7 +46,7 @@ def test_auto_converted_section():
     ir = _full_ir()
     report = build_report(ir, convert(ir), generated_date="2026-07-10")
     texts = [e.text for e in report.auto_converted]
-    assert any("[R-01] read_tests -> ReadTestsPlugin" in t for t in texts)
+    assert any("[R-01] read_tests -> ReadTestsTool" in t for t in texts)
     assert any("[R-11] audit_log" in t for t in texts)
 
 

@@ -50,11 +50,12 @@ def _ir() -> IR:
 
 def test_framework_docs_load():
     docs = load_framework_docs("maf", Config())
-    assert "AgentContext" in docs
-    assert "kernel_function" in docs
-    assert "HumanApprovalRequired" in docs
-    # vocabulary.json is bundled into the context too.
+    # The bundled true-MAF pack (docs.md + vocabulary.json) grounds Tier 3.
     assert "Microsoft Agent Framework" in docs
+    assert "WorkflowBuilder" in docs
+    assert "agent_framework" in docs
+    # vocabulary.json is bundled into the context too.
+    assert "reject_list" in docs
 
 
 def test_missing_framework_docs_is_empty_not_error():
@@ -76,7 +77,7 @@ def test_resolve_with_llm_parses_json():
     assert "def run" in result.generated_code
     assert result.confidence == 0.88
     # The prompt included the MAF knowledge pack.
-    assert "AgentContext" in fake.prompts[0]
+    assert "Microsoft Agent Framework" in fake.prompts[0]
 
 
 def test_resolve_handles_fenced_json():

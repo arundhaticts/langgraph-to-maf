@@ -32,10 +32,20 @@ _GEMINI_ENDPOINT = (
 
 
 def load_framework_docs(target_framework: str, config: Config) -> str:
-    """Read the target framework knowledge pack (docs + vocabulary) as context."""
+    """Read the target framework knowledge pack as the authoritative Tier-3 context.
+
+    The pack is the folder uploaded through the UI and stored in
+    `frameworks/<name>/`. Everything in it grounds the LLM:
+      - docs.md          -> prose idioms / mapping rules
+      - vocabulary.json  -> machine-readable term map + reject list
+      - examples/*.py    -> few-shot SOURCE->TARGET code samples
+    Attaching a pack for a brand-new framework is enough to target it -- no code
+    change here. Absent files are skipped so a minimal pack still works.
+    """
+    chunks: list[str] = []
     package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     base = os.path.join(package_root, config.frameworks_dir, target_framework)
-    chunks: list[str] = []
+
     for filename in ("docs.md", "vocabulary.json"):
         path = os.path.join(base, filename)
         if os.path.exists(path):
@@ -44,7 +54,29 @@ def load_framework_docs(target_framework: str, config: Config) -> str:
                     chunks.append(f"# {filename}\n{fh.read()}")
             except OSError:
                 continue
-    return "\n\n".join(chunks)
+
+    # Few-shot examples: every .py under examples/ (sorted for determinism).
+    examples_dir = os.path.join(base, "examples")
+    if os.path.isdir(examples_dir):
+        for name in sorted(os.listdir(examples_dir)):
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(examples_dir, name)
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    chunks.append(f"# example: {name}\n```python\n{fh.read()}\n```")
+            except OSError:
+                continue
+
+    if not chunks:
+        return ""  # no pack on disk -> Tier 3 has no target grounding (never errors)
+
+    header = (
+        "# AUTHORITATIVE target-framework knowledge pack\n"
+        f"Target framework: {target_framework}. Generate ONLY for this framework "
+        "using the idioms below. When this conflicts with prior knowledge, THIS wins.\n"
+    )
+    return "\n\n".join([header, *chunks])
 
 
 def _call_gemini_sdk(prompt: str, config: Config) -> Optional[str]:

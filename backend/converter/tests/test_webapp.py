@@ -120,6 +120,26 @@ def client():
     return TestClient(app)
 
 
+# A minimal but valid framework pack, uploaded under a throwaway name so the
+# bundled `maf` pack on disk is never overwritten by the test run.
+_TEST_FW = "webtestfw"
+_PACK = [
+    {"path": f"{_TEST_FW}/vocabulary.json",
+     "content": '{"framework": "webtestfw", "dependencies": {"required": ["some-sdk"]}}'},
+    {"path": f"{_TEST_FW}/docs.md", "content": "# Test FW pack"},
+]
+
+
+@pytest.fixture()
+def uploaded_pack():
+    """Provide the pack payload; remove the stored copy afterwards."""
+    from converter.adapters import frameworks_base
+
+    yield {"target": _TEST_FW, "framework_files": _PACK}
+    import shutil
+    shutil.rmtree(os.path.join(frameworks_base(), _TEST_FW), ignore_errors=True)
+
+
 def test_health_endpoint(client):
     r = client.get("/api/health")
     assert r.status_code == 200
@@ -128,12 +148,18 @@ def test_health_endpoint(client):
     assert "gemini_configured" in body
 
 
-def test_convert_endpoint_returns_zip(client):
-    r = client.post("/api/convert", json={"mode": "manual", "files": _payload()})
+def test_convert_endpoint_returns_zip(client, uploaded_pack):
+    r = client.post("/api/convert", json={"mode": "manual", "files": _payload(), **uploaded_pack})
     assert r.status_code == 200
     assert r.headers["content-type"] == "application/zip"
     with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
         assert "orchestrator.py" in zf.namelist()
+
+
+def test_convert_endpoint_requires_framework_pack(client):
+    # Framework pack is mandatory -> 400 when omitted.
+    r = client.post("/api/convert", json={"mode": "manual", "files": _payload()})
+    assert r.status_code == 400
 
 
 def test_convert_endpoint_empty_files_400(client):
@@ -150,10 +176,13 @@ def test_convert_endpoint_bad_repo_400(client):
     assert r.status_code == 400
 
 
-def test_convert_path_endpoint(client, tmp_path):
+def test_convert_path_endpoint(client, tmp_path, uploaded_pack):
     (tmp_path / "README.md").write_text(README, encoding="utf-8")
     (tmp_path / "agent.py").write_text(AGENT, encoding="utf-8")
-    r = client.post("/api/convert-path", json={"mode": "manual", "path": str(tmp_path)})
+    r = client.post(
+        "/api/convert-path",
+        json={"mode": "manual", "path": str(tmp_path), **uploaded_pack},
+    )
     assert r.status_code == 200
     with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
         assert "orchestrator.py" in zf.namelist()

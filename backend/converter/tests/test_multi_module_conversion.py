@@ -169,13 +169,19 @@ def test_output_is_a_single_maf_tree(tmp_path):
     assert "plugins/repo_reader.py" in paths
     # The original LangGraph tree must be GONE.
     assert not any(p.startswith("src/") for p in paths)
-    assert not any(p.startswith("tests/") or p.startswith("sample_data/") for p in paths)
+    assert not any(p.startswith("sample_data/") for p in paths)
+    # The converter ships its OWN smoke test, but the source's tests are not copied.
+    assert "tests/test_smoke.py" in paths
+    assert not any(p.startswith("tests/") and p != "tests/test_smoke.py" for p in paths)
 
 
 def test_no_langgraph_or_interrupt_anywhere(tmp_path):
     files = _convert(tmp_path)
     for rel, content in files.items():
         if not rel.endswith(".py"):
+            continue
+        # The vendored agent_framework/ stub is infrastructure, not converted code.
+        if rel.replace("\\", "/").startswith("agent_framework/"):
             continue
         for tok in ("langgraph", "StateGraph", "add_conditional_edges", "interrupt("):
             assert tok not in content, f"{tok!r} still in {rel}"
@@ -191,9 +197,9 @@ def test_every_generated_py_parses(tmp_path):
 
 def test_tools_are_plugin_classes_with_functions(tmp_path):
     plugin = _convert(tmp_path).get("plugins/repo_reader.py", "")
-    assert "class ReadTestsPlugin" in plugin
-    assert "kernel_function" in plugin
-    assert "def read_tests(path)" in plugin        # plain function present
+    # True MAF: function-style @ai_function tools, no dead plugin classes.
+    assert "@ai_function" in plugin
+    assert "def read_tests(path)" in plugin        # function present
     assert "os.listdir" in plugin                   # real body ported
 
 
@@ -202,11 +208,84 @@ def test_orchestrator_imports_tools_from_plugins(tmp_path):
     assert "from plugins.repo_reader import" in orch
 
 
+def test_maf_workflow_graph_wired_from_ir(tmp_path):
+    orch = _convert(tmp_path).get("orchestrator.py", "")
+    # Phase 4: executors wrapping the ported nodes.
+    assert '@executor(id="intake")' in orch
+    assert "await ctx.send_message(" in orch
+    assert "await ctx.yield_output(" in orch
+    # Phase 5 + 8: WorkflowBuilder with guarded + loop-back edges from the IR.
+    assert "WorkflowBuilder().set_start_executor(intake_exec)" in orch
+    assert "builder.add_edge(prioritisation_exec, revise_exec, condition=lambda s" in orch
+    assert "# loop back-edge" in orch
+    # Real routers drive the edge conditions.
+    assert "_r=coverage_floor_gate" in orch
+    assert "_r=route_after_validation" in orch
+
+
+def test_phase6_tools_registered_and_mapped(tmp_path):
+    orch = _convert(tmp_path).get("orchestrator.py", "")
+    # Tools registered (not orphaned) + node->tool mapping surfaced from the IR.
+    assert "AGENT_TOOLS = [" in orch
+    assert "read_tests" in orch and "detect_conventions" in orch
+    assert "NODE_TOOLS = {" in orch
+    assert '"intake":' in orch  # intake's tools are mapped
+
+
+def test_phase7_hitl_request_info_and_checkpointing(tmp_path):
+    orch = _convert(tmp_path).get("orchestrator.py", "")
+    # Fast-path switch + a real RequestInfoExecutor pause path, both wired.
+    assert "AUTO_APPROVE_HITL = True" in orch
+    assert "class HitlRemovalsRequest(RequestInfoMessage):" in orch
+    assert 'RequestInfoExecutor(id="request_info")' in orch
+    assert "async def hitl_removals_apply_exec(" in orch
+    assert "builder.add_edge(hitl_removals_exec, _request_info_exec)" in orch
+    assert "builder.add_edge(_request_info_exec, hitl_removals_apply_exec)" in orch
+    # Fast-path (auto-approve) executor path is also present and real.
+    assert "fast-path (auto-approve)" in orch
+    # Source used MemorySaver -> file-based checkpointing enabled.
+    assert "with_checkpointing(FileCheckpointStorage(" in orch
+
+
 def test_main_imports_converted_modules(tmp_path):
     main = _convert(tmp_path).get("main.py", "")
     assert "from orchestrator import run" in main
     assert "from agent_context import AgentContext" in main
     assert "src.graph" not in main and "langgraph" not in main
+
+
+def test_hitl_auto_approve_audit_is_consistent_dict(tmp_path):
+    orch = _convert(tmp_path).get("orchestrator.py", "")
+    # HITL auto-approve must use the audit(...) helper (dict), never a bare string.
+    assert 'ctx.audit_log.append(audit("hitl_removals", "auto_approved"))' in orch
+    assert 'ctx.audit_log.append("auto-approved' not in orch
+
+
+def test_all_tools_registered_no_orphans(tmp_path):
+    orch = _convert(tmp_path).get("orchestrator.py", "")
+    # Every converted tool appears in AGENT_TOOLS (instantiated, not orphaned).
+    assert "AGENT_TOOLS = [" in orch
+    for tool in ("read_tests", "detect_conventions"):
+        assert tool in orch.split("AGENT_TOOLS = [")[1].split("]")[0]
+
+
+def test_smoke_test_is_generated_and_valid(tmp_path):
+    import ast as _ast
+
+    files = _convert(tmp_path)
+    smoke = files.get("tests/test_smoke.py", "")
+    assert "def test_state_constructs():" in smoke
+    assert "def test_offline_entrypoint_present():" in smoke
+    _ast.parse(smoke)
+
+
+def test_phase9_entrypoint_drives_maf_workflow(tmp_path):
+    main = _convert(tmp_path).get("main.py", "")
+    # Phase 9: run_stream driver + request/resume loop, with offline fallback.
+    assert "async def run_workflow_stream(" in main
+    assert "workflow.run_stream(state)" in main
+    assert "send_responses_streaming(responses)" in main
+    assert "return run(state)  # offline fast-path" in main
 
 
 # ---------------------------------------------------------------------------
@@ -217,15 +296,17 @@ def test_requirements_drop_langgraph_add_target(tmp_path):
     reqs = _convert(tmp_path).get("requirements.txt", "")
     assert "langgraph" not in reqs
     assert "langchain" not in reqs
-    assert "semantic-kernel" in reqs           # target framework runtime dep
+    assert "agent-framework" in reqs           # target framework runtime dep
 
 
 def test_requirements_only_lists_what_is_imported(tmp_path):
     # The fixture's converted code imports nothing third-party beyond the target
-    # SDK (its tool bodies use only stdlib), so nothing spurious is listed.
+    # SDK and pydantic (the generated state is a pydantic BaseModel).
     reqs = _convert(tmp_path).get("requirements.txt", "")
-    for spurious in ("sentence-transformers", "pydantic", "python-dotenv"):
+    for spurious in ("sentence-transformers", "python-dotenv"):
         assert spurious not in reqs
+    # pydantic IS required now -- the state model imports it.
+    assert "pydantic" in reqs
     # stdlib is never listed.
     for stdlib in ("os", "operator", "typing", "dataclasses"):
         assert f"\n{stdlib}\n" not in reqs

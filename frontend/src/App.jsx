@@ -23,22 +23,35 @@ const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()))
 // For a separately-deployed backend, set VITE_API_BASE at build time.
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 
+// Files kept from an uploaded framework pack (docs, vocab, examples).
+const PACK_EXT = /\.(md|markdown|txt|json|ya?ml|py)$/i
+
 export default function App() {
   const inputRef = useRef(null)
+  const packRef = useRef(null)
   const [method, setMethod] = useState('path') // 'path' (recommended) | 'upload'
   const [path, setPath] = useState('')
   const [files, setFiles] = useState([])
   const [skipped, setSkipped] = useState(0)
   const [mode, setMode] = useState('llm')
+  const [pack, setPack] = useState([])       // [{path, content}] target framework pack
+  const [target, setTarget] = useState('')   // framework name (from pack top folder)
   const [reading, setReading] = useState(false)
   const [converting, setConverting] = useState(false)
   const [status, setStatus] = useState(null) // {kind:'ok'|'err', text}
+
+  // A valid pack must contain a vocabulary.json.
+  const packHasVocab = pack.some((f) => /(^|\/)vocabulary\.json$/i.test(f.path.replace(/\\/g, '/')))
 
   // webkitdirectory / directory are non-standard; set them imperatively.
   useEffect(() => {
     if (inputRef.current) {
       inputRef.current.setAttribute('webkitdirectory', '')
       inputRef.current.setAttribute('directory', '')
+    }
+    if (packRef.current) {
+      packRef.current.setAttribute('webkitdirectory', '')
+      packRef.current.setAttribute('directory', '')
     }
   }, [method])
 
@@ -63,6 +76,22 @@ export default function App() {
     setReading(false)
   }
 
+  async function onPickPack(e) {
+    const list = Array.from(e.target.files || [])
+    const collected = []
+    let top = ''
+    for (const f of list) {
+      const rel = (f.webkitRelativePath || f.name).replace(/\\/g, '/')
+      const parts = rel.split('/')
+      if (parts.length > 1) top = parts[0]
+      if (!PACK_EXT.test(f.name)) continue
+      try { collected.push({ path: rel, content: await f.text() }) } catch {}
+    }
+    setPack(collected)
+    setTarget(top)
+    setStatus(null)
+  }
+
   function download(blob) {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -77,7 +106,9 @@ export default function App() {
     setStatus(null)
     try {
       const endpoint = method === 'path' ? '/api/convert-path' : '/api/convert'
-      const body = method === 'path' ? { mode, path } : { mode, files }
+      const body = method === 'path'
+        ? { mode, path, target, framework_files: pack }
+        : { mode, files, target, framework_files: pack }
       const res = await fetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -103,14 +134,15 @@ export default function App() {
     }
   }
 
-  const canConvert = method === 'path' ? path.trim().length > 0 : files.length > 0
+  const hasSource = method === 'path' ? path.trim().length > 0 : files.length > 0
+  const canConvert = hasSource && packHasVocab
 
   return (
     <div className="wrap">
       <h1>Framework Conversion Utility</h1>
       <p className="sub">
-        Convert a <b>LangGraph</b> agent to the <b>Microsoft Agent Framework (MAF)</b>.
-        Point at the agent folder, choose how the hard parts are handled, and download the converted agent.
+        Convert a <b>LangGraph</b> agent to <b>any target framework</b>. Point at the agent folder,
+        upload the target framework's pack folder, choose how the hard parts are handled, and download the converted agent.
       </p>
 
       <div className="card">
@@ -150,6 +182,26 @@ export default function App() {
             </div>
           </label>
         )}
+      </div>
+
+      <div className="card">
+        <h2>Target framework pack <span style={{ fontWeight: 400, fontSize: 13, color: '#c0392b' }}>(required)</span></h2>
+        <p className="sub" style={{ marginTop: 0 }}>
+          Upload the target framework's <b>folder</b> (e.g. <code>maf/</code>). It must contain a <code>vocabulary.json</code>
+          (the term map that drives conversion); <code>docs.md</code> and <code>examples/*.py</code> ground the LLM.
+          The folder name becomes the target framework — this is how the tool targets any framework with no code change.
+        </p>
+        <label className="file">
+          Click to choose the framework folder
+          <input ref={packRef} type="file" multiple onChange={onPickPack} />
+          <div className="picked">
+            {pack.length
+              ? (packHasVocab
+                  ? <span>Target <b>{target || 'custom'}</b> — {pack.length} pack file{pack.length > 1 ? 's' : ''} loaded ✓</span>
+                  : <span style={{ color: '#c0392b' }}>{pack.length} files loaded, but no <code>vocabulary.json</code> found — pick the folder that contains it.</span>)
+              : <span>No framework folder selected</span>}
+          </div>
+        </label>
       </div>
 
       <div className="card">

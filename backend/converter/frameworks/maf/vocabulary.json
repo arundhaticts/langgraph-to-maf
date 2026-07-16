@@ -1,22 +1,208 @@
 {
-  "framework": "maf",
-  "display_name": "Microsoft Agent Framework",
-  "vocabulary": {
-    "tool": "skill",
-    "tools_heading": "Skills",
-    "state": "context",
-    "state_heading": "Context",
-    "graph": "orchestration",
-    "node": "step function",
-    "conditional_edge": "router dispatch"
+  "_meta": {
+    "framework": "Microsoft Agent Framework",
+    "pypi_package": "agent-framework",
+    "import_root": "agent_framework",
+    "version_tested": "latest",
+    "purpose": "Machine-readable term map consumed by Tier-1 TargetAdapter and Tier-2 templates. Keys are source-framework concepts; values are the authoritative MAF equivalents.",
+    "source_framework": "langgraph"
   },
-  "conventions": {
-    "context_class": "AgentContext",
-    "node_signature": "def name(ctx: AgentContext) -> AgentContext",
-    "router_signature": "def name(ctx: AgentContext) -> str",
-    "orchestration_entry": "def run(ctx: AgentContext) -> AgentContext",
-    "tool_decorator": "@kernel_function",
-    "append_only_update": "ctx.field.append(value)",
-    "hitl_exception": "HumanApprovalRequired"
+
+  "primitives": {
+    "StateGraph": {
+      "maf_equivalent": "Workflow",
+      "builder": "WorkflowBuilder",
+      "import": "from agent_framework import WorkflowBuilder",
+      "notes": "A LangGraph StateGraph with explicit nodes and edges maps to a MAF Workflow. Do NOT flatten into a linear run() function."
+    },
+    "CompiledGraph": {
+      "maf_equivalent": "Workflow",
+      "import": "from agent_framework import WorkflowBuilder",
+      "notes": "The compiled artifact is the same Workflow object returned by WorkflowBuilder.build()."
+    },
+    "ReactAgent": {
+      "maf_equivalent": "ChatAgent",
+      "import": "from agent_framework import ChatAgent",
+      "notes": "A single LLM agent with tool-calling in a loop maps to ChatAgent."
+    }
+  },
+
+  "state": {
+    "TypedDict": {
+      "maf_equivalent": "pydantic.BaseModel or dataclass",
+      "import": "from pydantic import BaseModel",
+      "notes": "Graph-level TypedDict state is replaced by typed message models passed along edges. For cross-cutting values use WorkflowContext shared state.",
+      "pattern": "class MyState(BaseModel):\n    field: list[dict]\n    count: int = 0"
+    },
+    "Annotated[list, add]": {
+      "maf_equivalent": "plain list field + .append()",
+      "notes": "Drop Annotated and operator.add entirely. Carry the list in the message model and append directly.",
+      "anti_pattern": "from operator import add",
+      "pattern": "state.my_list.append(item)"
+    },
+    "MemorySaver": {
+      "maf_equivalent": "FileCheckpointStorage",
+      "import": "from agent_framework import FileCheckpointStorage",
+      "pattern": "WorkflowBuilder().with_checkpointing(FileCheckpointStorage(dir_path='./.checkpoints'))"
+    },
+    "shared_state": {
+      "maf_api": {
+        "set": "await ctx.set_shared_state('key', value)",
+        "get": "await ctx.get_shared_state('key')"
+      },
+      "notes": "Use for values that many executors need to read or write (audit_log, project_id, etc.)."
+    }
+  },
+
+  "nodes": {
+    "node_function": {
+      "signature_source": "def node(state: dict) -> dict",
+      "maf_equivalent_class": "Executor subclass with @handler",
+      "maf_equivalent_function": "@executor decorated async function",
+      "imports": "from agent_framework import Executor, handler, WorkflowContext\n# or\nfrom agent_framework import executor, WorkflowContext",
+      "return_convention": "Call await ctx.send_message(TypedOutput(...)) instead of returning a dict. Never return a bare partial dict.",
+      "pattern_class": "class MyNode(Executor):\n    @handler\n    async def run(self, message: InputType, ctx: WorkflowContext[OutputType]) -> None:\n        result = process(message)\n        await ctx.send_message(OutputType(**result))",
+      "pattern_function": "@executor(id='my_node')\nasync def my_node(message: InputType, ctx: WorkflowContext[OutputType]) -> None:\n    await ctx.send_message(OutputType(...))"
+    },
+    "final_node": {
+      "notes": "A terminal node that produces the workflow output uses WorkflowContext[None, OutputType] and calls await ctx.yield_output(...) instead of send_message.",
+      "pattern": "class FinalNode(Executor):\n    @handler\n    async def run(self, message: Report, ctx: WorkflowContext[None, Report]) -> None:\n        await ctx.yield_output(message)"
+    }
+  },
+
+  "edges": {
+    "add_edge": {
+      "source_api": "builder.add_edge('a', 'b')",
+      "maf_api": ".add_edge(executor_a, executor_b)",
+      "notes": "Direct unconditional edge. Executors are passed by reference, not string name."
+    },
+    "add_conditional_edges": {
+      "source_api": "builder.add_conditional_edges('node', router_fn, {label: 'target'})",
+      "maf_api": "One .add_edge(src, target, condition=lambda m: ...) per branch",
+      "notes": "The router function becomes a predicate on the emitted message. Every branch needs its own edge call.",
+      "pattern": ".add_edge(validate, approve,  condition=lambda m: m.passed)\n.add_edge(validate, retry,   condition=lambda m: not m.passed and m.retries < MAX)\n.add_edge(validate, drop,    condition=lambda m: not m.passed and m.retries >= MAX)"
+    },
+    "cycle_loop": {
+      "source_pattern": "graph with a cycle (node A -> node B -> node A)",
+      "maf_pattern": "back-edge guarded by a termination condition",
+      "pattern": ".add_edge(gap_gen, validation)\n.add_edge(validation, gap_gen,  condition=lambda m: not m.passed and m.retries < MAX)\n.add_edge(validation, drop,     condition=lambda m: not m.passed and m.retries >= MAX)\n.add_edge(validation, next_step,condition=lambda m: m.passed)",
+      "notes": "Always include an iteration-cap condition to guarantee termination."
+    },
+    "fan_out": {
+      "maf_api": ".add_fan_out_edges(source_executor, [target_a, target_b, target_c])",
+      "notes": "Runs branches in parallel."
+    },
+    "fan_in": {
+      "maf_api": ".add_fan_in_edges([source_a, source_b, source_c], join_executor)",
+      "notes": "Waits for all branches before proceeding to the join executor."
+    }
+  },
+
+  "tools": {
+    "@tool": {
+      "source_decorator": "@tool",
+      "maf_equivalent": "plain typed function, or @ai_function to override name/description",
+      "import": "from agent_framework import ai_function",
+      "registration": "Pass the function in tools=[...] to ChatAgent, or call directly inside an executor.",
+      "pattern": "@ai_function(description='Return CI run stats for one test.')\ndef get_history(\n    test_id: Annotated[str, Field(description='The test id')],\n    path: Annotated[str | None, Field(description='Optional CI history file')] = None,\n) -> dict | None:\n    ...",
+      "anti_pattern": "Wrapper classes decorated with @kernel_function that are never instantiated or registered.",
+      "notes": "Do not emit dead tool-wrapper classes. Either wire the tool in properly or call the function directly."
+    },
+    "agent_as_tool": {
+      "maf_api": "agent.as_tool(name='...', description='...')",
+      "notes": "Use to compose agents — pass a sub-agent as a tool to a supervisor agent."
+    }
+  },
+
+  "hitl": {
+    "interrupt": {
+      "source_api": "interrupt(payload)",
+      "maf_equivalent": "RequestInfoExecutor + RequestInfoMessage + RequestResponse",
+      "import": "from agent_framework import RequestInfoExecutor, RequestInfoMessage, RequestResponse",
+      "pattern_request": "class ApprovalRequest(RequestInfoMessage):\n    checkpoint: str = ''\n    recommended: list = []\n\nclass HitlNode(Executor):\n    @handler\n    async def run(self, message: Payload, ctx: WorkflowContext) -> None:\n        if message.run_mode == 'automated':\n            await ctx.send_message(Approved(ids=message.recommended))\n            return\n        await ctx.send_message(\n            ApprovalRequest(checkpoint='approve_removals', recommended=message.recommended),\n            target_id=request_info.id,\n        )",
+      "pattern_resume": "class ApplyDecision(Executor):\n    @handler\n    async def run(self, reply: RequestResponse[ApprovalRequest, list], ctx: WorkflowContext) -> None:\n        approved = reply.data if reply.data is not None else reply.original_request.recommended\n        await ctx.send_message(Approved(ids=approved))",
+      "host_loop": "pending = RequestInfoExecutor.pending_requests(events)\nresponses = {r.request_id: get_human_decision(r) for r in pending}\nevents = await workflow.send_responses_streaming(responses)",
+      "notes": "Always keep an automated fast-path. Never implement HITL as commented-out code with a hard-coded auto-approve as the only live path."
+    }
+  },
+
+  "checkpointing": {
+    "MemorySaver": {
+      "maf_equivalent": "FileCheckpointStorage",
+      "import": "from agent_framework import FileCheckpointStorage",
+      "pattern": "storage = FileCheckpointStorage(dir_path='./.checkpoints')\nworkflow = WorkflowBuilder()...with_checkpointing(storage).build()\nawait workflow.run_from_checkpoint(checkpoint_id, checkpoint_storage=storage)"
+    }
+  },
+
+  "invocation": {
+    "graph.invoke": {
+      "maf_equivalent": "await workflow.run(input_model)"
+    },
+    "graph.stream": {
+      "maf_equivalent": "workflow.run_stream(input_model)"
+    },
+    "agent.invoke": {
+      "maf_equivalent": "await agent.run('message text')"
+    },
+    "agent.stream": {
+      "maf_equivalent": "async for update in agent.run_stream('...'): ..."
+    }
+  },
+
+  "providers": {
+    "notes": "MAF is provider-pluggable. The chat client is injected; swap the import to change provider.",
+    "azure_openai": {
+      "import": "from agent_framework.azure import AzureOpenAIChatClient",
+      "env_vars": ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_DEPLOYMENT"]
+    },
+    "openai": {
+      "import": "from agent_framework.openai import OpenAIChatClient",
+      "env_vars": ["OPENAI_API_KEY"]
+    },
+    "gemini_note": "If the source used Gemini, use an OpenAI-compatible Gemini endpoint with OpenAIChatClient, or swap to AzureOpenAIChatClient. The MAF framework itself does not change."
+  },
+
+  "reject_list": {
+    "description": "Any generated output containing the following is a conversion error.",
+    "items": [
+      "import semantic_kernel",
+      "from semantic_kernel",
+      "@kernel_function",
+      "Kernel()",
+      "kernel.add_plugin",
+      "semantic-kernel in requirements.txt",
+      "from langgraph",
+      "StateGraph(",
+      "add_conditional_edges(",
+      "from operator import add",
+      "Annotated[list, add]",
+      "interrupt(",
+      "TypedDict  (as graph state)",
+      "linear run(ctx) calling nodes in sequence when source had conditional edges",
+      "router function defined but not wired into .add_edge condition",
+      "tool wrapper class never instantiated or registered",
+      "executor returning bare partial dict",
+      "HITL as auto-approve-only with real logic in comments",
+      "stdlib module in requirements.txt (zipfile, json, io, os, sys, re, math, hashlib)"
+    ]
+  },
+
+  "dependencies": {
+    "required": ["agent-framework"],
+    "optional_by_feature": {
+      "azure_openai": "agent-framework[azure]",
+      "openai": "agent-framework[openai]",
+      "serving": "uvicorn",
+      "api": "fastapi",
+      "env_loading": "python-dotenv",
+      "embeddings": "sentence-transformers",
+      "spacy_ner": "spacy",
+      "ssl_trust": "truststore"
+    },
+    "never_include_in_requirements": [
+      "zipfile", "json", "io", "os", "sys", "re", "math",
+      "hashlib", "uuid", "typing", "dataclasses", "functools",
+      "subprocess", "logging", "datetime", "pathlib", "operator"
+    ]
   }
 }

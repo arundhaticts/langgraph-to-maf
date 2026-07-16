@@ -56,6 +56,11 @@ _LLM_CONSTRUCTORS = frozenset(
     }
 )
 
+# Persistence / checkpointer constructors (LangGraph savers).
+_CHECKPOINTER_CONSTRUCTORS = frozenset(
+    {"MemorySaver", "SqliteSaver", "AsyncSqliteSaver", "PostgresSaver", "AsyncPostgresSaver"}
+)
+
 # LangGraph sentinel node names, normalised for the IR.
 _SENTINELS = {"START": "START", "__start__": "START", "END": "END", "__end__": "END"}
 
@@ -363,6 +368,7 @@ def extract_state(source: str) -> list[StateField]:
                             name=stmt.target.id,
                             type=_safe_unparse(stmt.annotation) or "Any",
                             is_append_only=_is_append_only(stmt.annotation),
+                            default=_safe_unparse(stmt.value) if stmt.value else None,
                         )
                     )
 
@@ -403,10 +409,16 @@ def extract_config(source: str) -> ConfigSpec:
             if env and env not in config.env_vars:
                 config.env_vars.append(env)
             if _is_llm_constructor(node):
+                if config.llm_provider is None:
+                    config.llm_provider = _callable_name(node)
                 for kw in node.keywords:
                     if kw.arg is None:  # **kwargs spread
                         continue
                     config.llm_kwargs[kw.arg] = _literal(kw.value)
+            elif config.checkpointer is None:
+                saver = _callable_name(node)
+                if saver in _CHECKPOINTER_CONSTRUCTORS:
+                    config.checkpointer = saver
         elif isinstance(node, ast.Subscript):
             # os.environ["X"]
             if (

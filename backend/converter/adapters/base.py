@@ -63,6 +63,12 @@ class TargetAdapter(ABC):
 
     # --- idioms the generator reads instead of hardcoding a framework ---
 
+    def tool_style(self) -> str:
+        """How tools are emitted: 'function' (decorated plain functions, e.g. MAF
+        @ai_function) or 'plugin_class' (a class wrapping methods). Function-style
+        avoids dead wrapper classes that are never registered."""
+        return "plugin_class"
+
     def tool_decorator(self) -> str:
         """Decorator applied to plugin/skill methods."""
         return "kernel_function"
