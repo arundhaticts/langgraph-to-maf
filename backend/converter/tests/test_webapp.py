@@ -68,7 +68,7 @@ def test_strip_common_top():
 
 
 def test_convert_manual_mode_returns_zip():
-    zip_bytes = convert_folder(_payload(), "manual")
+    zip_bytes, _ = convert_folder(_payload(), "manual")
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         names = set(zf.namelist())
     assert {"agent_context.py", "orchestrator.py", "README.md",
@@ -78,7 +78,7 @@ def test_convert_manual_mode_returns_zip():
 def test_convert_output_is_valid_python():
     import ast
 
-    zip_bytes = convert_folder(_payload(), "manual")
+    zip_bytes, _ = convert_folder(_payload(), "manual")
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         for name in zf.namelist():
             if name.endswith(".py"):
@@ -94,7 +94,7 @@ def test_convert_local_path_ignores_dependency_dirs(tmp_path):
     for i in range(50):
         (venv / f"m{i}.py").write_text("x = 1\n", encoding="utf-8")
 
-    zip_bytes = convert_local_path(str(tmp_path), "manual")
+    zip_bytes, _ = convert_local_path(str(tmp_path), "manual")
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         names = set(zf.namelist())
     assert "orchestrator.py" in names

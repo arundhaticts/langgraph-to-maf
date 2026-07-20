@@ -25,7 +25,11 @@ def _load_dotenv_once() -> None:
     if _DOTENV_LOADED:
         return
     _DOTENV_LOADED = True
+    _scan_dotenv()
 
+
+def _scan_dotenv() -> None:
+    """Read the .env candidates into os.environ (existing vars always win)."""
     # config.py is at backend/converter/config.py -> package_root = backend/.
     package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     repo_root = os.path.dirname(package_root)  # .env typically lives here
@@ -133,4 +137,11 @@ class Config:
         """The Gemini API key from the environment (loading `.env` if needed)."""
         _load_dotenv_once()
         value = os.environ.get(self.llm_api_key_env)
+        if not value:
+            # A .env edited AFTER the server started (or after the first one-time
+            # load) is not in os.environ yet. Re-scan so a freshly-saved key is
+            # picked up without a restart. Existing env vars still win, so this
+            # can only ADD the missing key, never override a real one.
+            _scan_dotenv()
+            value = os.environ.get(self.llm_api_key_env)
         return value or None  # treat empty string (unfilled .env) as absent

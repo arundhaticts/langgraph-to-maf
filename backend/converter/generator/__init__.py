@@ -20,6 +20,8 @@ from converter.generator.docs_generator import (
 from converter.generator.readme_generator import build_readme, write_readme
 from converter.generator.readiness_report import (
     generate_readiness_report,
+    validate_metrics,
+    write_readiness_metrics,
     write_readiness_report,
 )
 from converter.generator.report_generator import (
@@ -41,5 +43,7 @@ __all__ = [
     "build_architecture_md",
     "write_docs",
     "generate_readiness_report",
+    "validate_metrics",
+    "write_readiness_metrics",
     "write_readiness_report",
 ]

@@ -140,7 +140,7 @@ def _convert(agent_src: str, source: str, target: str) -> zipfile.ZipFile:
         {"path": "agent/README.md", "content": README},
         {"path": "agent/agent.py", "content": agent_src},
     ]
-    raw = convert_folder(files, "manual", target=target, source=source)
+    raw, _ = convert_folder(files, "manual", target=target, source=source)
     return zipfile.ZipFile(io.BytesIO(raw))
 
 

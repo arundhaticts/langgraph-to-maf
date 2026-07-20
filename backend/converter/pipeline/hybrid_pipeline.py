@@ -25,7 +25,9 @@ from converter.generator import (
     build_report,
     generate_from_paths,
     generate_readiness_report,
+    validate_metrics,
     write_docs,
+    write_readiness_metrics,
     write_readiness_report,
     write_readme,
     write_report,
@@ -153,14 +155,20 @@ class HybridPipeline(ConversionPipeline):
         write_docs(ir, conversion, generation.output_root, self.config)
 
         # Stage 10 -- agent-specific READINESS report (LLM-authored; deterministic
-        # fallback when no key). What's left, who fixes it, time, accuracy.
-        write_readiness_report(
-            generate_readiness_report(
-                ir, conversion, generation, self.config,
-                acceptance=acceptance, agent_name=agent_name,
-            ),
-            generation.output_root,
+        # fallback when no key). What's left, who fixes it, time, accuracy. The
+        # numeric metrics are computed deterministically and written as a JSON
+        # sidecar the web service reads directly (no Markdown re-parsing).
+        readiness_md, readiness_metrics = generate_readiness_report(
+            ir, conversion, generation, self.config,
+            acceptance=acceptance, agent_name=agent_name,
         )
+        problems = validate_metrics(readiness_metrics)
+        if problems:
+            raise ValueError(
+                "Readiness metric validation failed: " + "; ".join(problems)
+            )
+        write_readiness_report(readiness_md, generation.output_root)
+        write_readiness_metrics(readiness_metrics, generation.output_root)
 
         # Stage 11 -- LLM Refinement Pass (gate-closed repair loop).
         # Feeds the generated code + READINESS_REPORT.md + the ACTUAL acceptance-

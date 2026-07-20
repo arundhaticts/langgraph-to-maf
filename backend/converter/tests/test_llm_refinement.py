@@ -427,7 +427,7 @@ def test_refinement_log_in_zip_output():
         {"path": "a/README.md", "content": README},
         {"path": "a/agent.py", "content": LG_SOURCE},
     ]
-    raw = convert_folder(files, "manual", target="maf", source="langgraph")
+    raw, _ = convert_folder(files, "manual", target="maf", source="langgraph")
     zf = zipfile.ZipFile(io.BytesIO(raw))
     assert "REFINEMENT_LOG.md" in zf.namelist(), (
         f"REFINEMENT_LOG.md missing from zip. Got: {zf.namelist()}"

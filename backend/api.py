@@ -91,14 +91,15 @@ def convert(request: ConvertRequest) -> Response:
     payload = [f.model_dump() for f in request.files]
     pack = [f.model_dump() for f in request.framework_files]
     try:
-        zip_bytes = convert_folder(
+        zip_bytes, summary = convert_folder(
             payload, request.mode, request.target, pack, source=request.source
         )
     except (ScannerError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # noqa: BLE001 - surface failures to the UI
         raise HTTPException(status_code=500, detail=str(exc))
-    return _zip_response(zip_bytes)
+    folder_name = _folder_name_from_files(request.files)
+    return _zip_response(zip_bytes, folder_name, request.target, summary)
 
 
 @app.post("/api/convert-path")
@@ -112,22 +113,76 @@ def convert_path(request: ConvertPathRequest) -> Response:
         raise HTTPException(status_code=400, detail="No folder path provided.")
     pack = [f.model_dump() for f in request.framework_files]
     try:
-        zip_bytes = convert_local_path(
+        zip_bytes, summary = convert_local_path(
             request.path, request.mode, request.target, pack, source=request.source
         )
     except (ScannerError, NotADirectoryError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc))
-    return _zip_response(zip_bytes)
+    folder_name = os.path.basename(request.path.rstrip("/\\").rstrip()) or "agent"
+    return _zip_response(zip_bytes, folder_name, request.target, summary)
 
 
-def _zip_response(zip_bytes: bytes) -> Response:
-    return Response(
-        content=zip_bytes,
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="converted_agent.zip"'},
+def _folder_name_from_files(files) -> str:
+    if not files:
+        return "agent"
+    first = files[0].path.replace("\\", "/").split("/")[0]
+    return first or "agent"
+
+
+def _make_zip_filename(folder_name: str, target: str) -> str:
+    """Build the output zip name: {input_folder_name}-{target_framework}.zip.
+
+    Sanitises each part to a safe slug (letters/digits/hyphens) and joins them
+    with a single hyphen -- never a generic, internal, or temp-dir name.
+    """
+    import re
+
+    def _slug(text: str, fallback: str) -> str:
+        s = re.sub(r"[^A-Za-z0-9]+", "-", (text or "").strip()).strip("-").lower()
+        return s or fallback
+
+    return f"{_slug(folder_name, 'agent')}-{_slug(target, 'converted')}.zip"
+
+
+def _zip_response(
+    zip_bytes: bytes,
+    folder_name: str = "agent",
+    target: str = "converted",
+    summary: dict | None = None,
+) -> Response:
+    filename = _make_zip_filename(folder_name, target)
+    # Validation gate: the name MUST follow {input}-{target}.zip exactly.
+    if not filename.endswith(".zip") or filename.count("-") < 1:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Output zip name '{filename}' does not follow "
+            "'{input_folder_name}-{target_framework}.zip'.",
+        )
+    s = summary or {}
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "X-Zip-Filename": filename,
+        "X-Target-Framework": target,
+        "X-Files-Converted": s.get("files_converted", ""),
+        "X-Conversion-Time": s.get("conversion_time", ""),
+        "X-Total-Human-Time": s.get("total_time", ""),
+        "X-Overall-Accuracy": s.get("accuracy", ""),
+        "X-Highest-Accuracy": s.get("highest_accuracy", ""),
+        "X-Lowest-Accuracy": s.get("lowest_accuracy", ""),
+        "X-Readiness-Pct": s.get("readiness_pct", ""),
+        "X-Production-Readiness": s.get("production_readiness", ""),
+        "X-Confidence": s.get("confidence", ""),
+        "X-Confidence-Range": s.get("confidence_range", ""),
+        "X-Effort-Low": s.get("low_end_effort", ""),
+        "X-Effort-High": s.get("high_end_effort", ""),
+        "X-Effort-Avg-High": s.get("avg_high_effort", ""),
+    }
+    headers["Access-Control-Expose-Headers"] = ", ".join(
+        k for k in headers if k.startswith("X-")
     )
+    return Response(content=zip_bytes, media_type="application/zip", headers=headers)
 
 
 # Serve the built React app if it exists (after `npm run build`).

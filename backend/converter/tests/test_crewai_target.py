@@ -71,7 +71,7 @@ result = assistant("hi")
 
 
 def _zip(files, source):
-    z = convert_folder(files, "manual", target="crewai", source=source)
+    z, _ = convert_folder(files, "manual", target="crewai", source=source)
     return zipfile.ZipFile(io.BytesIO(z))
 
 

@@ -32,10 +32,11 @@ def test_fallback_report_has_sections_and_agent_details(tmp_path):
     ir = _ir_with_hitl_and_orphan()
     gen = generate(ir, convert(ir), str(tmp_path))
     # Deterministic mode -> no LLM -> fallback report.
-    md = generate_readiness_report(
+    md, metrics = generate_readiness_report(
         ir, convert(ir), gen, Config(mode=ConversionMode.DETERMINISTIC), agent_name="MyAgent"
     )
     assert "# Readiness Report - MyAgent" in md
+    assert "## Readiness Summary" in md
     assert "## Remaining work" in md
     assert "## Accuracy by dimension" in md
     assert "## Key insight" in md
@@ -45,6 +46,11 @@ def test_fallback_report_has_sections_and_agent_details(tmp_path):
     # Owner + time columns present.
     assert "Human via Claude Code" in md
     assert "agent_framework/ is a local stub" in md
+    # Computed metrics are present and real (not placeholders).
+    assert metrics["average_accuracy"] > 0
+    assert metrics["total_effort_minutes"] > 0
+    assert metrics["production_readiness"] in ("Low", "Medium", "High")
+    assert "%" in metrics["accuracy_display"]
 
 
 def test_llm_path_used_when_client_available(tmp_path):
@@ -59,11 +65,14 @@ def test_llm_path_used_when_client_available(tmp_path):
             assert "READINESS report" in prompt  # agent facts were sent
             return _FakeResp()
 
-    md = generate_readiness_report(
+    md, metrics = generate_readiness_report(
         ir, convert(ir), gen, Config(mode=ConversionMode.HYBRID),
         agent_name="LLM", client=_FakeClient(),
     )
     assert "(llm authored)" in md
+    # The deterministic summary is prepended even on the LLM path.
+    assert "## Readiness Summary" in md
+    assert metrics["average_accuracy"] > 0
 
 
 def test_code_stubs_detected_and_flagged_for_human(tmp_path):
@@ -87,7 +96,7 @@ def test_code_stubs_detected_and_flagged_for_human(tmp_path):
     assert "NotImplementedError" in labels
     assert "loop iteration cap" in labels.lower()
 
-    md = generate_readiness_report(
+    md, _metrics = generate_readiness_report(
         ir, convert(ir), gen, Config(mode=ConversionMode.DETERMINISTIC), agent_name="StubAgent"
     )
     assert "NotImplementedError" in md

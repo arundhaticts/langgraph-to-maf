@@ -67,6 +67,23 @@ _GRAPH_ASSEMBLY_TOKENS = (
     ".compile(", "MemorySaver", "SqliteSaver",
 )
 
+# Import roots that belong to source frameworks and must NEVER appear in output.
+# langgraph, langchain, langchain_core, langchain_community are all dropped.
+_SOURCE_FW_ROOTS = frozenset({
+    "langgraph", "langchain", "langchain_core", "langchain_community",
+    "langchain_openai", "langchain_anthropic", "langchain_google_genai",
+})
+
+# Tool-decorator names from ANY known framework. When we carry a tool file's full
+# source and re-decorate its functions with the TARGET decorator, any of these
+# left on the function is a foreign decorator that must be stripped first --
+# otherwise the output stacks two decorators (or dangles one whose import we just
+# dropped, e.g. langchain's `@tool`).
+_FOREIGN_TOOL_DECORATORS = frozenset({
+    "tool", "ai_function", "kernel_function", "function_tool",
+    "StructuredTool", "structured_tool",
+})
+
 # Entrypoint modules: their functions (run/initial_state/main/...) are NOT node
 # helpers and must not be dumped into the orchestrator. Pass 4 generates a fresh
 # entrypoint instead.
@@ -274,7 +291,7 @@ def _rewrite_import_line(line: str, source_root: str, inlined: set[str]) -> str 
     m = _IMPORT_RE.match(line)
     if m:
         mod = m.group("mod")
-        if mod.split(".")[0] == "langgraph":
+        if mod.split(".")[0] in _SOURCE_FW_ROOTS:
             return None
         new_mod = _rewrite_module(mod, source_root)
         if new_mod is None:
@@ -288,7 +305,7 @@ def _rewrite_import_line(line: str, source_root: str, inlined: set[str]) -> str 
     m = _IMPORT_PLAIN_RE.match(line)
     if m:
         mod = m.group("mod")
-        if mod.split(".")[0] == "langgraph":
+        if mod.split(".")[0] in _SOURCE_FW_ROOTS:
             return None
         new_mod = _rewrite_module(mod, source_root)
         if new_mod is None:
@@ -390,7 +407,7 @@ def _curate_imports(lines: list[str], used: set[str], config_consts) -> str:
             mod = node.module or ""
             if mod == "__future__":
                 continue
-            if mod.split(".")[0] == "langgraph":
+            if mod.split(".")[0] in _SOURCE_FW_ROOTS:
                 continue
             kept = []
             for a in node.names:
@@ -406,7 +423,7 @@ def _curate_imports(lines: list[str], used: set[str], config_consts) -> str:
         elif isinstance(node, ast.Import):
             kept_aliases = []
             for a in node.names:
-                if a.name.split(".")[0] == "langgraph":
+                if a.name.split(".")[0] in _SOURCE_FW_ROOTS:
                     continue
                 bound = a.asname or a.name.split(".")[0]
                 if bound in used:
@@ -494,7 +511,7 @@ class _ImportRewriter(ast.NodeTransformer):
     def visit_Import(self, node: ast.Import):
         kept = []
         for alias in node.names:
-            if alias.name.split(".")[0] == "langgraph":
+            if alias.name.split(".")[0] in _SOURCE_FW_ROOTS:
                 continue
             new = _rewrite_module(alias.name, self.root)
             if new:
@@ -507,13 +524,42 @@ class _ImportRewriter(ast.NodeTransformer):
     def visit_ImportFrom(self, node: ast.ImportFrom):
         if node.level:
             return node
-        if (node.module or "").split(".")[0] == "langgraph":
+        if (node.module or "").split(".")[0] in _SOURCE_FW_ROOTS:
             return None
         new = _rewrite_module(node.module or "", self.root)
         if new is None:
             return None
         node.module = new
         return node
+
+
+_ORPHANED_GUARD_RE = re.compile(
+    r"^[ \t]*try:\s*\n"                          # try:
+    r"(?:[ \t]+[^\n]*\n)*?"                       # any leading lines in the try body
+    r"[ \t]+_HAVE_\w+\s*=\s*True\s*\n"           # _HAVE_XXX = True   (the only real content)
+    r"(?:[ \t]+[^\n]*\n)*?"                       # any trailing lines still in try body
+    r"[ \t]*except\s+\w[\w\s,]*:\s*\n"           # except ImportError: / except Exception:
+    r"[ \t]+_HAVE_\w+\s*=\s*False\s*\n",         # _HAVE_XXX = False
+    re.MULTILINE,
+)
+
+
+def _strip_orphaned_fw_guards(content: str) -> str:
+    """Remove try/except skeletons left after source-framework imports are stripped.
+
+    When the import rewriter drops e.g. `from langgraph import StateGraph` from
+    inside a try block, the assignment `_HAVE_LANGGRAPH = True` is left behind,
+    producing a broken-looking pattern:
+
+        try:
+            _HAVE_LANGGRAPH = True   # the import was removed
+        except ImportError:
+            _HAVE_LANGGRAPH = False
+
+    This regex recognises that pattern and removes it entirely so the output
+    does not suggest LangGraph is conditionally available.
+    """
+    return _ORPHANED_GUARD_RE.sub("", content)
 
 
 def _rewrite_support_module(source: str, source_root: str | None) -> str:
@@ -899,13 +945,23 @@ def _write_text(result: GenerationResult, rel_path: str, content: str) -> None:
     result.written_files.append(rel_path)
 
 
+_ENV_VAR_RE = re.compile(r'^[A-Z][A-Z0-9_]{1,}$')
+
+
 def _write_env_example(result: GenerationResult, ir: IR) -> None:
-    """Emit .env.example with one placeholder line per env var found in the source."""
-    vars_found: list[str] = list(ir.config.env_vars) if ir.config.env_vars else []
+    """Emit .env.example with one placeholder line per real env var in the source.
+
+    Only names that look like genuine shell environment variables are included:
+    ALL_CAPS, at least two characters, letters/digits/underscores. This filters
+    out dict keys, URL segments, state field names, and other false positives the
+    parser may have collected alongside real os.getenv() calls.
+    """
+    raw: list[str] = list(ir.config.env_vars) if ir.config.env_vars else []
+    vars_found = [v for v in raw if _ENV_VAR_RE.match(v)]
     if not vars_found:
         return
     lines = ["# Copy this file to .env and fill in your values.", ""]
-    for var in vars_found:
+    for var in sorted(set(vars_found)):
         lines.append(f"{var}=<your-value-here>")
     lines.append("")
     _write_text(result, ".env.example", "\n".join(lines))
@@ -971,6 +1027,16 @@ def _decorator_shim(adapter: TargetAdapter) -> str:
         "            return fn\n"
         "        return _wrap\n"
     )
+
+
+def _decorator_root_name(dec: ast.expr) -> str:
+    """The trailing name of a decorator: `tool`, `mod.tool`, `tool(...)` -> 'tool'."""
+    node = dec.func if isinstance(dec, ast.Call) else dec
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Name):
+        return node.id
+    return ""
 
 
 def _plugin_module_name(source_file: str | None) -> str:
@@ -1221,10 +1287,13 @@ def generate(
         run_block=run_block,
         maf_workflow=maf_block,
     )
-    # Final pass: rewrite any remaining function-level source imports in bodies.
+    # Final pass: rewrite any remaining function-level source imports in bodies,
+    # then strip orphaned _HAVE_LANGGRAPH-style guard skeletons left behind after
+    # the source-framework import lines were removed.
     if source_root:
         orch_rendered = _rewrite_imports_in_text(orch_rendered, source_root, inlined)
         orch_rendered = _rewrite_path_anchors(orch_rendered, source_root)
+    orch_rendered = _strip_orphaned_fw_guards(orch_rendered)
     _write_python(result, "orchestrator.py", orch_rendered)
     _validate_target(
         result, "orchestrator.py", orch_rendered,
@@ -1261,25 +1330,123 @@ def generate(
     return result
 
 
+def _prune_carried_tool_module(
+    tree: ast.Module, ir: IR, tool_names: set[str], source_adapter
+) -> None:
+    """Strip everything that is NOT a tool (or a genuine tool helper) from a
+    carried tool-file AST, in place.
+
+    A single-file source agent puts the tools, the state class, the graph nodes,
+    the graph assembly, and the LLM client all in one module. Carried verbatim,
+    that drags StateGraph / TypedDict / ChatOpenAI / node functions into
+    plugins/<mod>.py. We keep the tool functions and neutral module members and
+    drop the framework machinery (it is re-synthesised in orchestrator.py):
+
+      - state classes (agent_context.py owns state)
+      - node / router callables that are not tools (inlined in orchestrator.py)
+      - any statement carrying graph-assembly tokens (StateGraph, .add_node, ...)
+      - module-level LLM-client constructions (llm = ChatOpenAI(...))
+    """
+    vocab = source_adapter.vocabulary() if source_adapter else None
+    state_names = set(ir.state_class_names)
+    if vocab:
+        state_names |= set(getattr(vocab, "state_base_classes", frozenset()))
+    node_callables = _node_or_router_callables(ir)
+    llm_ctors = set(getattr(vocab, "llm_constructors", frozenset())) if vocab else set()
+    llm_prefixes = tuple(getattr(vocab, "llm_constructor_prefixes", ()) or ()) if vocab else ()
+
+    def _is_llm_ctor(name: str) -> bool:
+        return name in llm_ctors or any(name.startswith(p) for p in llm_prefixes)
+
+    def _call_root(value: ast.expr) -> str:
+        func = value.func if isinstance(value, ast.Call) else None
+        if isinstance(func, ast.Attribute):
+            return func.attr
+        if isinstance(func, ast.Name):
+            return func.id
+        return ""
+
+    kept: list[ast.stmt] = []
+    for stmt in tree.body:
+        # State classes -> agent_context.py owns them.
+        if isinstance(stmt, ast.ClassDef):
+            bases = {b.id for b in stmt.bases if isinstance(b, ast.Name)}
+            if stmt.name in state_names or (bases & state_names):
+                continue
+        # Node / router functions (not tools) -> inlined into orchestrator.py.
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if stmt.name in node_callables and stmt.name not in tool_names:
+                continue
+        # Module-level LLM client construction (llm = ChatOpenAI(...)).
+        if isinstance(stmt, ast.Assign) and _is_llm_ctor(_call_root(stmt.value)):
+            continue
+        # Any statement that is graph assembly (g = StateGraph(...), g.add_node(...)).
+        try:
+            seg = ast.unparse(stmt)
+        except Exception:  # pragma: no cover - unparse is robust on parsed trees
+            seg = ""
+        if any(tok in seg for tok in _GRAPH_ASSEMBLY_TOKENS):
+            continue
+        kept.append(stmt)
+    tree.body = kept
+
+    # Drop imports left unused after pruning (e.g. `TypedDict`/`Annotated` once
+    # the state class that referenced them is gone) so no source-framework typing
+    # residue remains in the plugin module.
+    body_text = "\n".join(
+        ast.unparse(s) for s in tree.body
+        if not isinstance(s, (ast.Import, ast.ImportFrom))
+    )
+    used = _names_used(body_text)
+    pruned_body: list[ast.stmt] = []
+    for stmt in tree.body:
+        if isinstance(stmt, ast.ImportFrom) and stmt.module == "__future__":
+            pruned_body.append(stmt)
+            continue
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            names = [a for a in stmt.names if (a.asname or a.name.split(".")[0]) in used]
+            if not names:
+                continue
+            stmt.names = names
+        pruned_body.append(stmt)
+    tree.body = pruned_body
+
+
 def _plugin_module_from_source(
-    source: str, tools: list[ToolSpec], adapter: TargetAdapter, source_root: str | None
+    source: str,
+    tools: list[ToolSpec],
+    adapter: TargetAdapter,
+    source_root: str | None,
+    ir: IR | None = None,
+    source_adapter=None,
 ) -> str:
     """Build a plugin module from the tool file's FULL source.
 
-    Unlike the stripped version, this keeps the module's classes, module-level
-    singletons (e.g. `_default = VectorStore()`), and private helpers -- so the
-    tool functions' dependencies still resolve -- while rewriting `src.*` imports
-    and decorating the public tool functions (function-style targets).
+    Keeps the module's genuine tool dependencies (private helpers, neutral
+    module-level singletons like `_default = VectorStore()`) so the tool
+    functions still resolve, while rewriting `src.*` imports, decorating the
+    public tool functions, and -- when the IR is provided -- pruning the source
+    framework machinery (state class, graph nodes, graph assembly, LLM client)
+    that a single-file agent co-locates with its tools.
     """
     tree = ast.parse(source)
     _ImportRewriter(source_root).visit(tree)
     ast.fix_missing_locations(tree)
 
     tool_by_name = {t.name: t for t in tools}
+    if ir is not None:
+        _prune_carried_tool_module(tree, ir, set(tool_by_name), source_adapter)
     function_style = adapter.tool_style() == "function"
     if function_style:
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in tool_by_name:
+                # Drop any foreign tool decorator (e.g. langchain's `@tool`, whose
+                # import we just removed) before applying the target's decorator --
+                # otherwise the function stacks two decorators or dangles a name.
+                node.decorator_list = [
+                    d for d in node.decorator_list
+                    if _decorator_root_name(d) not in _FOREIGN_TOOL_DECORATORS
+                ]
                 desc = tool_by_name[node.name].docstring or node.name
                 dec = ast.parse(adapter.tool_decorator_call(repr(desc))).body[0].value
                 node.decorator_list.insert(0, dec)
@@ -1342,6 +1509,7 @@ def generate_from_paths(
     # and singletons the tool functions rely on are preserved (fixes NameErrors
     # like `_default = VectorStore()` missing from the stripped plugin module).
     adapter = adapter or get_target_adapter(ir.metadata.target_framework or "maf")
+    source_adapter = get_source_adapter(ir.metadata.source_framework)
     tools_by_file: dict[str, list[ToolSpec]] = {}
     for tool in ir.tools:
         if tool.source_file:
@@ -1352,7 +1520,8 @@ def generate_from_paths(
             continue
         try:
             full = _plugin_module_from_source(
-                open(src, encoding="utf-8").read(), tools, adapter, source_root
+                open(src, encoding="utf-8").read(), tools, adapter, source_root,
+                ir=ir, source_adapter=source_adapter,
             )
         except SyntaxError:
             continue

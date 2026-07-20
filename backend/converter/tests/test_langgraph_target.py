@@ -66,7 +66,7 @@ g.add_conditional_edges("check", route, {"again": "check", "done": END})
 
 
 def _zip(files, source):
-    z = convert_folder(files, "manual", target="langgraph", source=source)
+    z, _ = convert_folder(files, "manual", target="langgraph", source=source)
     return zipfile.ZipFile(io.BytesIO(z))
 
 

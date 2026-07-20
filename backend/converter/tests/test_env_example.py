@@ -68,7 +68,7 @@ def _convert(source: str) -> zipfile.ZipFile:
         {"path": "agent/README.md", "content": README},
         {"path": "agent/agent.py", "content": source},
     ]
-    raw = convert_folder(files, "manual", target="crewai", source="crewai")
+    raw, _ = convert_folder(files, "manual", target="crewai", source="crewai")
     return zipfile.ZipFile(io.BytesIO(raw))
 
 

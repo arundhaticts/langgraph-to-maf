@@ -103,11 +103,54 @@ def save_framework_pack(files: list[dict], target_name: str | None = None) -> st
     return name
 
 
+def _extract_report_summary(out_dir: str) -> dict:
+    """Load the computed readiness metrics written by the pipeline.
+
+    Reads readiness_metrics.json (the machine-readable sidecar) so the UI shows
+    the exact computed values -- no Markdown re-parsing, no placeholder text.
+    """
+    import json
+
+    summary = {
+        "total_time": "",
+        "accuracy": "",
+        "readiness_pct": "",
+        "production_readiness": "",
+        "confidence": "",
+        "confidence_range": "",
+        "low_end_effort": "",
+        "high_end_effort": "",
+        "avg_high_effort": "",
+        "highest_accuracy": "",
+        "lowest_accuracy": "",
+    }
+    metrics_path = os.path.join(out_dir, "readiness_metrics.json")
+    try:
+        with open(metrics_path, encoding="utf-8") as fh:
+            m = json.load(fh)
+    except Exception:
+        return summary
+
+    summary["total_time"] = str(m.get("recommended_effort", ""))
+    summary["accuracy"] = str(m.get("accuracy_display", ""))
+    summary["readiness_pct"] = str(m.get("readiness_pct", ""))
+    summary["production_readiness"] = str(m.get("production_readiness", ""))
+    summary["confidence"] = str(m.get("confidence", ""))
+    summary["confidence_range"] = str(m.get("confidence_range", ""))
+    summary["low_end_effort"] = str(m.get("low_end_effort", ""))
+    summary["high_end_effort"] = str(m.get("high_end_effort", ""))
+    summary["avg_high_effort"] = str(m.get("average_high_end_effort", ""))
+    summary["highest_accuracy"] = str(m.get("highest_accuracy", ""))
+    summary["lowest_accuracy"] = str(m.get("lowest_accuracy", ""))
+    return summary
+
+
 def _run_and_zip(
     input_path: str, mode: str, target: str, source: str | None = None
-) -> bytes:
+) -> tuple[bytes, dict]:
     """Run the pipeline on `input_path` for `target` and zip the output folder.
 
+    Returns (zip_bytes, summary_dict) where summary_dict has total_time and accuracy.
     The scanner ignores dependency dirs (.venv, node_modules, __pycache__, ...),
     so a huge folder is scanned in terms of its source only. `source` is an
     optional explicit source-framework override (else it is auto-detected).
@@ -122,20 +165,39 @@ def _run_and_zip(
         raise ValueError(
             f"Unknown source framework '{source}'. Known sources: {known}."
         )
+    import time
+
     conversion_mode = MODE_MAP.get(mode, ConversionMode.HYBRID)
     config = Config(mode=conversion_mode, target_framework=target, source_framework=source)
     out_dir = tempfile.mkdtemp(prefix="fcu_out_")
     try:
+        started = time.monotonic()
         HybridPipeline(config).run(input_path, out_dir)
+        elapsed = time.monotonic() - started
+
+        summary = _extract_report_summary(out_dir)
         buffer = io.BytesIO()
+        file_count = 0
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             for root, _dirs, filenames in os.walk(out_dir):
                 for name in filenames:
                     abs_path = os.path.join(root, name)
                     zf.write(abs_path, os.path.relpath(abs_path, out_dir))
-        return buffer.getvalue()
+                    file_count += 1
+        summary["files_converted"] = str(file_count)
+        summary["conversion_time"] = _fmt_elapsed(elapsed)
+        return buffer.getvalue(), summary
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    """Human 'Nm Ss' / 'Ns' for a wall-clock duration."""
+    total = int(round(seconds))
+    mins, secs = divmod(total, 60)
+    if mins:
+        return f"{mins}m {secs:02d}s"
+    return f"{secs}s"
 
 
 def convert_local_path(
@@ -144,7 +206,7 @@ def convert_local_path(
     target: str = "maf",
     framework_files: list[dict] | None = None,
     source: str | None = None,
-) -> bytes:
+) -> tuple[bytes, dict]:
     """Convert a folder already on disk (no source upload) to `target`.
 
     The target is normally chosen from the frameworks/ folder on disk. The legacy
@@ -164,8 +226,8 @@ def convert_folder(
     target: str = "maf",
     framework_files: list[dict] | None = None,
     source: str | None = None,
-) -> bytes:
-    """Write uploaded source files to a temp dir, convert to `target`, return a zip."""
+) -> tuple[bytes, dict]:
+    """Write uploaded source files to a temp dir, convert to `target`, return (zip, summary)."""
     if framework_files:
         target = save_framework_pack(framework_files, target)
     in_dir = tempfile.mkdtemp(prefix="fcu_in_")

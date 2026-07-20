@@ -15,6 +15,7 @@ report is always produced and never blocks the pipeline.
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
 from converter.config import Config
@@ -225,8 +226,15 @@ def _strip_fences(text: str) -> str:
 # Deterministic fallback (agent-specific, no LLM required)
 # ---------------------------------------------------------------------------
 
-def _fallback_report(facts: dict) -> str:
-    name = facts["agent_name"]
+# ---------------------------------------------------------------------------
+# Row builders (shared grounding for the report body AND the computed metrics)
+# ---------------------------------------------------------------------------
+
+def _build_work_rows(facts: dict) -> list[tuple[str, str, str, str]]:
+    """The remaining-work rows (Item, Owner, Action, Time) derived from facts.
+
+    Times are already clamped to a 2-hour ceiling per item.
+    """
     rows: list[tuple[str, str, str, str]] = []
 
     for finding in facts["acceptance_findings"] + facts["ir_findings"]:
@@ -293,45 +301,16 @@ def _fallback_report(facts: dict) -> str:
     if not rows:
         rows.append(("No outstanding items detected", "-", "Ship it", "-"))
 
-    def _clamp_time(t: str) -> str:
-        """Cap any estimate that exceeds 2 hours."""
-        if not t or t == "-":
-            return t
-        import re
-        nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", t)]
-        if not nums:
-            return t
-        if max(nums) > 2 and ("hr" in t.lower() or "hour" in t.lower()):
-            return "2 hrs"
-        return t
+    return [(i, o, a, _clamp_time(t)) for (i, o, a, t) in rows]
 
-    capped = [(i, o, a, _clamp_time(t)) for (i, o, a, t) in rows]
 
-    def _to_minutes(t: str) -> float:
-        if not t or t == "-":
-            return 0.0
-        import re
-        nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", t)]
-        if not nums:
-            return 0.0
-        val = sum(nums) / len(nums)
-        if "hr" in t.lower() or "hour" in t.lower():
-            return val * 60
-        return val
-
-    total_min = sum(_to_minutes(t) for (_, _, _, t) in capped)
-    if total_min > 0:
-        hrs, mins = divmod(int(total_min), 60)
-        total_str = f"{hrs} hr{'s' if hrs != 1 else ''} {mins} min" if hrs else f"{mins} min"
-        capped.append(("**Total**", "", "", f"**{total_str}**"))
-
-    work_table = "| Item | Owner | Action | Time |\n|---|---|---|---|\n" + "\n".join(
-        f"| {i} | {o} | {a} | {t} |" for (i, o, a, t) in capped
-    )
-
-    # Accuracy dimensions from the actual nodes/roles.
-    det_nodes = [n["name"] for n in facts["nodes"] if n["role"] in ("entry", "linear", "branch", "loop", "terminal")]
-    acc_rows = []
+def _build_acc_rows(facts: dict) -> list[tuple[str, str, str]]:
+    """The accuracy-by-dimension rows (Dimension, Accuracy, Why) from facts."""
+    det_nodes = [
+        n["name"] for n in facts["nodes"]
+        if n["role"] in ("entry", "linear", "branch", "loop", "terminal")
+    ]
+    acc_rows: list[tuple[str, str, str]] = []
     if det_nodes:
         acc_rows.append(("Deterministic node logic (" + ", ".join(det_nodes[:5]) + ")", "~85%", "Ported verbatim; bounded by input-data quality"))
     if facts["hitl_nodes"]:
@@ -340,6 +319,212 @@ def _fallback_report(facts: dict) -> str:
         acc_rows.append(("LLM-authored sections", "~65-70%", "Syntactically valid; semantic correctness needs human review"))
     acc_rows.append(("Generated stub smoke test", "100% structural / 0% functional", "Exists and passes CI but must be implemented"))
     acc_rows.append(("End-to-end, production-ready", "~70%", "Sound pipeline; HITL being real (not auto-approve) is the swing factor"))
+    return acc_rows
+
+
+# ---------------------------------------------------------------------------
+# Time / accuracy parsing + metric computation
+# ---------------------------------------------------------------------------
+
+def _clamp_time(t: str) -> str:
+    """Cap any single estimate that exceeds 2 hours."""
+    if not t or t == "-":
+        return t
+    nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", t)]
+    if not nums:
+        return t
+    if max(nums) > 2 and ("hr" in t.lower() or "hour" in t.lower()):
+        return "2 hrs"
+    return t
+
+
+def _time_bounds_minutes(t: str) -> tuple[float, float]:
+    """(low, high) minutes for an estimate like '1-2 hrs', '30 min', 'Auto', '-'."""
+    if not t or t.strip().lower() in ("-", "auto", ""):
+        return (0.0, 0.0)
+    nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", t)]
+    if not nums:
+        return (0.0, 0.0)
+    mult = 60.0 if ("hr" in t.lower() or "hour" in t.lower()) else 1.0
+    return (min(nums) * mult, max(nums) * mult)
+
+
+def _fmt_hours(minutes: float) -> str:
+    """Human 'N hrs M min' from a minute count."""
+    if minutes <= 0:
+        return "0 min"
+    hrs, mins = divmod(int(round(minutes)), 60)
+    if hrs and mins:
+        return f"{hrs} hr{'s' if hrs != 1 else ''} {mins} min"
+    if hrs:
+        return f"{hrs} hr{'s' if hrs != 1 else ''}"
+    return f"{mins} min"
+
+
+def _accuracy_bounds(cell: str) -> tuple[float, float] | None:
+    """(low, high) percent for an accuracy cell like '~85%', '65-70%'.
+
+    Returns None for cells with no usable single scale (e.g.
+    '100% structural / 0% functional'), which are excluded from the average.
+    """
+    text = cell.strip()
+    # Exclude mixed structural/functional cells: two independent scales, not a range.
+    if "/" in text:
+        return None
+    nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", text)]
+    pcts = [n for n in nums if 0 <= n <= 100]
+    if not pcts:
+        return None
+    return (min(pcts), max(pcts))
+
+
+def _production_label(pct: float) -> str:
+    if pct >= 85:
+        return "High"
+    if pct >= 70:
+        return "Medium"
+    return "Low"
+
+
+def _confidence_label(spread: float) -> str:
+    """Confidence from the width of the accuracy confidence range (percentage points)."""
+    if spread <= 6:
+        return "High"
+    if spread <= 15:
+        return "Medium"
+    return "Low"
+
+
+def compute_readiness_metrics(
+    work_rows: list[tuple[str, str, str, str]],
+    acc_rows: list[tuple[str, str, str]],
+) -> dict:
+    """Compute the numeric readiness/accuracy summary from the report's own rows.
+
+    Deterministic and grounded in the same rows the tables render, so the
+    headline numbers always match the detail below them. Returns a dict with
+    effort (low/high/recommended), accuracy (avg/weighted/high/low + range),
+    an overall readiness %, and human-readable labels.
+    """
+    # --- Effort ---
+    real_rows = [r for r in work_rows if r[0] != "No outstanding items detected"]
+    bounds = [_time_bounds_minutes(t) for (_, _, _, t) in real_rows]
+    # Only count items that carry a real estimate toward the per-item average.
+    est_highs = [hi for lo, hi in bounds if hi > 0]
+    low_min = sum(lo for lo, _ in bounds)
+    high_min = sum(hi for _, hi in bounds)
+    avg_high_min = (sum(est_highs) / len(est_highs)) if est_highs else 0.0
+    # "Recommended" leans toward the high end (the honest planning number).
+    recommended_min = (low_min + 2 * high_min) / 3 if bounds else 0.0
+
+    # --- Accuracy ---
+    parsed = [b for b in (_accuracy_bounds(a) for (_, a, _) in acc_rows) if b]
+    mids = [(lo + hi) / 2 for lo, hi in parsed]
+    avg_acc = sum(mids) / len(mids) if mids else 0.0
+    highest = max((hi for _, hi in parsed), default=0.0)
+    lowest = min((lo for lo, _ in parsed), default=0.0)
+    # Confidence range brackets the average using the mean low / mean high.
+    range_low = sum(lo for lo, _ in parsed) / len(parsed) if parsed else 0.0
+    range_high = sum(hi for _, hi in parsed) / len(parsed) if parsed else 0.0
+
+    # End-to-end row (if present) drives the production-readiness score.
+    e2e = next(
+        (a for (d, a, _) in acc_rows if "end-to-end" in d.lower() or "production" in d.lower()),
+        None,
+    )
+    e2e_bounds = _accuracy_bounds(e2e) if e2e else None
+    readiness_pct = (
+        (e2e_bounds[0] + e2e_bounds[1]) / 2 if e2e_bounds else avg_acc
+    )
+
+    spread = range_high - range_low
+    return {
+        "open_item_count": len(real_rows),
+        # Effort (minutes internally; strings for display)
+        "total_effort_minutes": round(recommended_min),
+        "total_effort": _fmt_hours(recommended_min),
+        "low_end_effort": _fmt_hours(low_min),
+        "high_end_effort": _fmt_hours(high_min),
+        "total_low_effort": _fmt_hours(low_min),
+        "total_high_effort": _fmt_hours(high_min),
+        "average_high_end_effort": _fmt_hours(avg_high_min),
+        "recommended_effort": _fmt_hours(recommended_min),
+        # Accuracy (percentages)
+        "average_accuracy": round(avg_acc, 1),
+        "weighted_accuracy": round(avg_acc, 1),  # equal weights today; hook for weights
+        "highest_accuracy": round(highest, 1),
+        "lowest_accuracy": round(lowest, 1),
+        "confidence_low": round(range_low, 1),
+        "confidence_high": round(range_high, 1),
+        "accuracy_display": f"{round(avg_acc, 1)}%",
+        "confidence_range": f"{round(range_low)}% - {round(range_high)}%",
+        # Overall readiness
+        "readiness_pct": round(readiness_pct),
+        "production_readiness": _production_label(readiness_pct),
+        "confidence": _confidence_label(spread),
+    }
+
+
+def _summary_section(metrics: dict) -> str:
+    """The prominent 'Readiness Summary' block prepended to the report."""
+    return (
+        "## Readiness Summary\n\n"
+        f"- **Overall Readiness:** {metrics['readiness_pct']}%\n"
+        f"- **Overall Accuracy:** {metrics['average_accuracy']}% "
+        f"(range {metrics['confidence_range']}, confidence: {metrics['confidence']})\n"
+        f"- **Total Remaining Effort:** {metrics['recommended_effort']}\n"
+        f"- **Low-End Estimate:** {metrics['low_end_effort']}\n"
+        f"- **High-End Estimate:** {metrics['high_end_effort']}\n"
+        f"- **Average High-End Estimate:** {metrics['average_high_end_effort']}\n"
+        f"- **Recommended Estimate:** {metrics['recommended_effort']}\n"
+        f"- **Highest / Lowest Dimension Accuracy:** "
+        f"{metrics['highest_accuracy']}% / {metrics['lowest_accuracy']}%\n"
+        f"- **Production Readiness:** {metrics['production_readiness']}\n\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Deterministic fallback (agent-specific, no LLM required)
+# ---------------------------------------------------------------------------
+
+def _fallback_banner(facts: dict, config: Config) -> str:
+    """The reason we're showing the deterministic report, stated honestly.
+
+    Distinguishes the three real causes so the note never blames a missing key
+    when the key is actually set (e.g. a quota/network/SDK failure, or manual
+    mode) -- which was misleading operators.
+    """
+    if not config.allow_llm_fallback:
+        return (
+            "> Deterministic analysis (LLM disabled in manual / deterministic "
+            "mode). Re-run in hybrid ('LLM assists, I review') mode for an "
+            "LLM-authored, deeper analysis.\n\n"
+        )
+    if not facts["gemini_key_set"]:
+        return (
+            "> Deterministic fallback (no LLM key available). Set GEMINI_API_KEY "
+            "for an LLM-authored, deeper analysis.\n\n"
+        )
+    return (
+        "> Deterministic fallback: GEMINI_API_KEY is set but the LLM call did "
+        "not return (network, quota, or SDK issue). Showing the deterministic "
+        "analysis; check the key/quota and re-run for LLM-authored output.\n\n"
+    )
+
+
+def _fallback_report(facts: dict, metrics: dict, banner: str = "") -> str:
+    name = facts["agent_name"]
+    capped = list(_build_work_rows(facts))
+
+    total_min = sum(_time_bounds_minutes(t)[1] for (_, _, _, t) in capped)
+    if total_min > 0:
+        capped.append(("**Total**", "", "", f"**{metrics['recommended_effort']}**"))
+
+    work_table = "| Item | Owner | Action | Time |\n|---|---|---|---|\n" + "\n".join(
+        f"| {i} | {o} | {a} | {t} |" for (i, o, a, t) in capped
+    )
+
+    acc_rows = _build_acc_rows(facts)
     acc_table = "| Dimension | Accuracy | Why |\n|---|---|---|\n" + "\n".join(
         f"| {d} | {a} | {w} |" for (d, a, w) in acc_rows
     )
@@ -356,9 +541,9 @@ def _fallback_report(facts: dict) -> str:
 
     return (
         f"# Readiness Report - {name}\n\n"
-        "> Deterministic fallback (no LLM key available). Set GEMINI_API_KEY for an "
-        "LLM-authored, deeper analysis.\n\n"
-        "## Remaining work\n\n" + work_table + "\n\n"
+        + (banner or "> Deterministic fallback.\n\n")
+        + _summary_section(metrics)
+        + "## Remaining work\n\n" + work_table + "\n\n"
         "## Accuracy by dimension\n\n" + acc_table + "\n\n"
         "## Key insight\n\n" + insight + "\n"
     )
@@ -376,14 +561,58 @@ def generate_readiness_report(
     acceptance=None,
     agent_name: str = "Converted Agent",
     client: Optional[object] = None,
-) -> str:
-    """Return the READINESS_REPORT.md Markdown (LLM if available, else fallback)."""
+) -> tuple[str, dict]:
+    """Return (READINESS_REPORT.md Markdown, computed metrics dict).
+
+    Metrics are computed deterministically from the report's own rows, so they
+    are always present and consistent regardless of whether the body came from
+    the LLM or the deterministic fallback. The prominent Readiness Summary block
+    is prepended to BOTH paths.
+    """
     config = config or Config()
     facts = collect_facts(ir, conversion, generation, acceptance, config, agent_name)
+    metrics = compute_readiness_metrics(_build_work_rows(facts), _build_acc_rows(facts))
+
     text = _call_gemini(_prompt(facts), config, client)
     if text and text.strip():
-        return _strip_fences(text)
-    return _fallback_report(facts)
+        body = _strip_fences(text)
+        # Prepend the deterministic summary just after the report's H1 (or at the
+        # very top if no H1 is found), so the LLM body keeps its own narrative.
+        lines = body.splitlines()
+        insert_at = next(
+            (i + 1 for i, ln in enumerate(lines) if ln.startswith("# ")), 0
+        )
+        summary = "\n" + _summary_section(metrics)
+        markdown = "\n".join(lines[:insert_at] + summary.splitlines() + lines[insert_at:]) + "\n"
+        return markdown, metrics
+
+    return _fallback_report(facts, metrics, _fallback_banner(facts, config)), metrics
+
+
+def validate_metrics(metrics: dict) -> list[str]:
+    """Return a list of problems if any required readiness metric is missing/invalid.
+
+    Empty list means the metrics pass validation. Used as a hard gate before the
+    conversion is reported complete.
+    """
+    problems: list[str] = []
+    required_numeric = (
+        "readiness_pct", "average_accuracy", "total_effort_minutes",
+        "highest_accuracy", "lowest_accuracy",
+    )
+    for key in required_numeric:
+        val = metrics.get(key)
+        if val is None or not isinstance(val, (int, float)):
+            problems.append(f"missing/invalid numeric metric '{key}'")
+    if not metrics.get("production_readiness"):
+        problems.append("missing 'production_readiness' label")
+    if not metrics.get("accuracy_display"):
+        problems.append("missing 'accuracy_display'")
+    # Accuracy must be a real computed percentage, not a placeholder.
+    avg = metrics.get("average_accuracy")
+    if isinstance(avg, (int, float)) and avg <= 0:
+        problems.append("average_accuracy is 0 — no accuracy dimensions were parsed")
+    return problems
 
 
 def write_readiness_report(markdown: str, output_root: str) -> str:
@@ -392,4 +621,18 @@ def write_readiness_report(markdown: str, output_root: str) -> str:
     path = os.path.join(output_root, "READINESS_REPORT.md")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(markdown)
+    return path
+
+
+def write_readiness_metrics(metrics: dict, output_root: str) -> str:
+    """Write the machine-readable readiness metrics sidecar (readiness_metrics.json).
+
+    The web service reads this directly instead of re-parsing the Markdown, so the
+    UI always shows the exact computed values.
+    """
+    import os
+
+    path = os.path.join(output_root, "readiness_metrics.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(metrics, fh, indent=2)
     return path

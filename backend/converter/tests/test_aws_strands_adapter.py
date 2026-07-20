@@ -84,7 +84,7 @@ def test_end_to_end_single_agent_mode(tmp_path):
 
 
 def test_strands_to_maf_wires_single_agent():
-    z = convert_folder(_files(), "manual", target="maf", source="aws_strands")
+    z, _ = convert_folder(_files(), "manual", target="maf", source="aws_strands")
     zf = zipfile.ZipFile(io.BytesIO(z))
     orch = zf.read("orchestrator.py").decode()
     # SINGLE_AGENT mode -> a ChatAgent is built with the converted tools.
@@ -96,7 +96,7 @@ def test_strands_to_maf_wires_single_agent():
 
 
 def test_strands_to_langgraph_single_node():
-    z = convert_folder(_files(), "manual", target="langgraph", source="aws_strands")
+    z, _ = convert_folder(_files(), "manual", target="langgraph", source="aws_strands")
     zf = zipfile.ZipFile(io.BytesIO(z))
     orch = zf.read("orchestrator.py").decode()
     assert 'builder.add_node("assistant", assistant)' in orch
