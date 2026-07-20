@@ -148,6 +148,18 @@ def test_health_endpoint(client):
     assert "gemini_configured" in body
 
 
+def test_frameworks_endpoint_lists_capabilities(client):
+    r = client.get("/api/frameworks")
+    assert r.status_code == 200
+    fws = {f["name"]: f for f in r.json()["frameworks"]}
+    # All bundled frameworks support both source and target.
+    assert fws["maf"]["target"] is True
+    assert fws["maf"]["source"] is True
+    assert fws["langgraph"]["source"] is True
+    assert fws["langgraph"]["target"] is True
+    assert all({"name", "display_name", "source", "target"} <= set(f) for f in fws.values())
+
+
 def test_convert_endpoint_returns_zip(client, uploaded_pack):
     r = client.post("/api/convert", json={"mode": "manual", "files": _payload(), **uploaded_pack})
     assert r.status_code == 200
@@ -156,9 +168,19 @@ def test_convert_endpoint_returns_zip(client, uploaded_pack):
         assert "orchestrator.py" in zf.namelist()
 
 
-def test_convert_endpoint_requires_framework_pack(client):
-    # Framework pack is mandatory -> 400 when omitted.
+def test_convert_endpoint_no_pack_uses_selected_target(client):
+    # Dropdown flow: no pack upload; the target is picked from disk (default maf).
     r = client.post("/api/convert", json={"mode": "manual", "files": _payload()})
+    assert r.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        assert "orchestrator.py" in zf.namelist()
+
+
+def test_convert_endpoint_unknown_target_400(client):
+    r = client.post(
+        "/api/convert",
+        json={"mode": "manual", "files": _payload(), "target": "no_such_fw"},
+    )
     assert r.status_code == 400
 
 

@@ -52,8 +52,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         default=ConversionMode.HYBRID.value,
-        choices=[m.value for m in ConversionMode],
-        help="Conversion approach (default: hybrid).",
+        # Only the implemented approaches are offered. HYBRID (LLM for the hard
+        # parts) is the default; DETERMINISTIC is HYBRID with the LLM disabled.
+        # (FULL_LLM exists in the enum for the future but has no pipeline yet.)
+        choices=[m.value for m in PIPELINE_REGISTRY],
+        help="Conversion approach: 'hybrid' (default, LLM handles the hard parts) "
+        "or 'deterministic' (no LLM; hard parts left as marked stubs).",
     )
     parser.add_argument(
         "--source",

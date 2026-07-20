@@ -548,6 +548,8 @@ def build_ir(
         preamble=inventory.preamble,
         state_class_names=inventory.state_class_names,
         files=manifest.files if manifest else [],
+        agent_specs=inventory.agent_specs,
+        task_specs=inventory.task_specs,
     )
 
 

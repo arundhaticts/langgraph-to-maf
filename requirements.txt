@@ -6,6 +6,7 @@
 
 # ---- Core converter (always required) ----
 Jinja2>=3.1
+pydantic>=2.0
 
 # ---- Web backend (FastAPI + ASGI server) ----
 fastapi>=0.110
@@ -27,3 +28,24 @@ httpx>=0.27        # required by FastAPI's TestClient in the test suite
 # google-genai>=0.3
 # truststore>=0.9          # lets the SDK use the OS trust store (TLS proxies)
 # websockets<16            # pin only if the mirror 403s on websockets 16.x
+
+# ---- OPTIONAL: Runtime dependencies for converted output -----------------------
+# The converter itself does NOT need these. Install only if you want to run the
+# generated code locally for that target framework.
+#
+# MAF (Mavericks Agent Framework -- internal):
+#   agent-framework
+#
+# LangGraph:
+#   langgraph>=0.2
+#   langchain-core>=0.2
+#   langchain-openai>=0.1        # or langchain-anthropic, etc.
+#
+# CrewAI:
+#   crewai>=0.80
+#   crewai-tools                 # optional prebuilt tools
+#
+# AWS Strands:
+#   strands-agents>=0.1
+#   strands-agents-tools         # optional prebuilt tools
+#   boto3                        # if using Amazon Bedrock (default provider)

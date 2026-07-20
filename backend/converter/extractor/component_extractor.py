@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import os
 
+from converter.adapters import get_source_adapter
 from converter.config import Config
 from converter.contracts import (
+    AgentSpec,
     ComponentInventory,
     ConfigSpec,
     FileAction,
@@ -30,6 +32,8 @@ from converter.contracts import (
     GraphSpec,
     ReadmeSections,
     RepoManifest,
+    SourceVocabulary,
+    TaskSpec,
     ToolSpec,
 )
 from converter.parser.code_parser import (
@@ -228,6 +232,14 @@ def extract_components(
     inventory = ComponentInventory()
     per_file: dict[str, dict[str, bool]] = {}
 
+    # Resolve the source-framework vocabulary the parser matches against. An
+    # explicit --source override wins over the scanner's auto-detection; if
+    # neither resolves a known adapter, fall back to the default vocabulary
+    # (LangGraph values) so behaviour is unchanged for the reference source.
+    source_name = config.source_framework or manifest.detected_framework
+    source_adapter = get_source_adapter(source_name)
+    vocab = source_adapter.vocabulary() if source_adapter else SourceVocabulary()
+
     # If the repo has a real config module (config.py/settings.py/constants.py),
     # ALL_CAPS constants are swept ONLY from it -- this keeps sample-data / graph /
     # node module constants (GRAPH, SEED, GOLDEN, ...) out of the generated config
@@ -257,13 +269,20 @@ def extract_components(
             )
             continue
         try:
-            tools = extract_tools(source, source_file=entry.relative_path)
-            graph = extract_graph(source)
-            state = extract_state(source)
-            file_config = extract_config(source)
+            tools = extract_tools(source, source_file=entry.relative_path, vocab=vocab)
+            # Adapter may own graph extraction (e.g. CrewAI's Crew/Task); if it
+            # declines (returns None), fall back to the vocabulary-driven parser.
+            graph = source_adapter.extract_graph(source) if source_adapter else None
+            if graph is None:
+                graph = extract_graph(source, vocab=vocab)
+            state = extract_state(source, vocab=vocab)
+            file_config = extract_config(source, vocab=vocab)
             functions = extract_functions(source, source_file=entry.relative_path)
-            imports = extract_imports(source)
-            preamble = extract_preamble(source)
+            imports = extract_imports(source, vocab=vocab)
+            preamble = extract_preamble(source, vocab=vocab)
+            # Agent / task specs (role-based frameworks: CrewAI, Strands).
+            file_agents: list[AgentSpec] = source_adapter.extract_agents(source) if source_adapter else []
+            file_tasks: list[TaskSpec] = source_adapter.extract_tasks(source) if source_adapter else []
         except SyntaxError as exc:
             inventory.warnings.append(
                 f"{entry.relative_path} did not parse ({exc.msg}); skipped."
@@ -300,9 +319,21 @@ def extract_components(
                 inventory.state.append(field)
                 existing_state.add(field.name)
 
-        for cls_name in extract_state_class_names(source):
+        for cls_name in extract_state_class_names(source, vocab=vocab):
             if cls_name not in inventory.state_class_names:
                 inventory.state_class_names.append(cls_name)
+
+        # Merge agent / task specs (dedup by name across files).
+        existing_agents = {a.name for a in inventory.agent_specs}
+        for spec in file_agents:
+            if spec.name not in existing_agents:
+                inventory.agent_specs.append(spec)
+                existing_agents.add(spec.name)
+        existing_tasks = {t.name for t in inventory.task_specs}
+        for spec in file_tasks:
+            if spec.name not in existing_tasks:
+                inventory.task_specs.append(spec)
+                existing_tasks.add(spec.name)
 
         per_file[entry.relative_path] = {
             "tools": bool(tools),

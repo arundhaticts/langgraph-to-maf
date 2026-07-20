@@ -66,6 +66,35 @@ def test_llm_path_used_when_client_available(tmp_path):
     assert "(llm authored)" in md
 
 
+def test_code_stubs_detected_and_flagged_for_human(tmp_path):
+    """Deterministic stub markers in the output become 'Human via Claude Code' rows
+    (which also feed the LLM refinement loop to draft a basic version)."""
+    ir = _ported_ir()
+    gen = generate(ir, convert(ir), str(tmp_path))
+    # Simulate an unresolved-orchestration stub left in the generated code.
+    stub_path = tmp_path / "orchestrator.py"
+    stub_path.write_text(
+        "def run(ctx):\n"
+        "    # TODO: confirm the real loop cap\n"
+        "    raise NotImplementedError('Convert the orchestration by hand.')\n",
+        encoding="utf-8",
+    )
+    if "orchestrator.py" not in gen.written_files:
+        gen.written_files.append("orchestrator.py")
+
+    facts = collect_facts(ir, convert(ir), gen, config=Config(), agent_name="StubAgent")
+    labels = " ".join(s["label"] for s in facts["code_stubs"])
+    assert "NotImplementedError" in labels
+    assert "loop iteration cap" in labels.lower()
+
+    md = generate_readiness_report(
+        ir, convert(ir), gen, Config(mode=ConversionMode.DETERMINISTIC), agent_name="StubAgent"
+    )
+    assert "NotImplementedError" in md
+    assert "orchestrator.py" in md
+    assert "Human via Claude Code" in md
+
+
 def test_llm_fence_stripping():
     from converter.generator.readiness_report import _strip_fences
 

@@ -30,7 +30,10 @@ from converter.generator import (
     write_readme,
     write_report,
 )
+from converter.engine.capability_negotiation import negotiate, negotiation_summary
+from converter.generator.llm_refinement import run_llm_refinement, write_refinement_log
 from converter.ir import build_ir, validate_ir, write_ir_json
+from converter.adapters import get_target_adapter
 from converter.parser import parse_readme_file
 from converter.pipeline.base import ConversionPipeline
 from converter.scanner import scan_repo
@@ -76,6 +79,26 @@ class HybridPipeline(ConversionPipeline):
         # human sees source inconsistencies instead of silent broken output.
         ir_issues = validate_ir(ir)
 
+        # Stage 4.6 -- Phase 5b: capability negotiation.
+        # Check every IR construct against the target framework's capability
+        # matrix. LOSSY → needs_review; UNSUPPORTED → manual_action_required.
+        # This runs before code generation so the generator can tag stubs.
+        target_adapter_obj = get_target_adapter(self.config.target_framework or "maf")
+        cap_results = negotiate(ir, target_adapter_obj)
+        cap_summary = negotiation_summary(cap_results)
+        for cap in cap_results:
+            from converter.contracts import ConstructSupport
+            if cap.support == ConstructSupport.LOSSY:
+                ir_issues.append(
+                    f"[CAP-LOSSY] {cap.construct.value}: {cap.detail}. "
+                    + (cap.emulation_note or "Emulated.")
+                )
+            elif cap.support == ConstructSupport.UNSUPPORTED:
+                ir_issues.append(
+                    f"[CAP-UNSUPPORTED] {cap.construct.value}: {cap.detail}. "
+                    + (cap.manual_action or "Manual implementation required.")
+                )
+
         # Stage 5 -- Module 6: Tier 1/2/3 conversion engine.
         conversion = convert(ir, self.config)
 
@@ -92,7 +115,10 @@ class HybridPipeline(ConversionPipeline):
         acceptance = verify_output(ir, generation)
         # Optionally run the subprocess runnable-checks (stub imports + build_workflow).
         if self.config.validate_output:
-            for check in verify_runnable(generation.output_root):
+            for check in verify_runnable(
+                generation.output_root,
+                target=self.config.target_framework or "maf",
+            ):
                 acceptance.add(*check)
         write_acceptance(acceptance, generation.output_root)
         for issue in acceptance.issues():
@@ -135,6 +161,25 @@ class HybridPipeline(ConversionPipeline):
             ),
             generation.output_root,
         )
+
+        # Stage 11 -- LLM Refinement Pass (gate-closed repair loop).
+        # Feeds the generated code + READINESS_REPORT.md + the ACTUAL acceptance-
+        # gate failures back to the LLM, applies validated patches, and re-runs the
+        # gate -- looping until it is green or the iteration cap is hit. Gracefully
+        # skipped when no API key is set or the LLM returns nothing. Never blocks.
+        refinement = run_llm_refinement(
+            ir, conversion, generation, self.config,
+            output_root=generation.output_root,
+            agent_name=agent_name,
+        )
+        write_refinement_log(refinement, generation.output_root, agent_name=agent_name)
+
+        # If the refinement loop changed any files, the ACCEPTANCE.md written at
+        # Stage 6.5 is stale -- re-run the gate and rewrite it so the shipped
+        # acceptance report reflects the final (repaired) code.
+        if refinement.ran and refinement.patches:
+            acceptance = verify_output(ir, generation)
+            write_acceptance(acceptance, generation.output_root)
 
         # main.py prints the output path; the pipeline just returns the report.
         return report

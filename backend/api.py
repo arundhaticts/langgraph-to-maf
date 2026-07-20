@@ -27,7 +27,7 @@ from pydantic import BaseModel
 # Make `converter` and `service` importable regardless of how uvicorn is launched.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from converter.adapters import list_frameworks  # noqa: E402
+from converter.adapters import list_frameworks_detailed  # noqa: E402
 from converter.config import Config  # noqa: E402
 from converter.scanner import ScannerError  # noqa: E402
 from service import convert_folder, convert_local_path  # noqa: E402
@@ -53,23 +53,30 @@ class UploadedFile(BaseModel):
 class ConvertRequest(BaseModel):
     mode: str = "llm"                 # "llm" | "manual"
     files: list[UploadedFile]
-    target: str = "maf"              # target framework name
-    # Target-framework pack folder uploaded in the UI (must contain a
-    # vocabulary.json). It is saved to frameworks/<target>/ and drives conversion.
+    source: str | None = None        # source framework (None -> auto-detect)
+    target: str = "maf"              # target framework name (chosen in the UI)
+    # Optional legacy path: upload a target-framework pack folder (with a
+    # vocabulary.json). Normally the UI just picks `target` from the frameworks/
+    # folder on disk and no upload is needed.
     framework_files: list[UploadedFile] = []
 
 
 class ConvertPathRequest(BaseModel):
     mode: str = "llm"                 # "llm" | "manual"
     path: str                        # local folder path (backend reads from disk)
+    source: str | None = None
     target: str = "maf"
     framework_files: list[UploadedFile] = []
 
 
 @app.get("/api/frameworks")
 def frameworks() -> dict:
-    """Targetable framework names (built-ins + uploaded packs on disk)."""
-    return {"frameworks": list_frameworks()}
+    """All known frameworks with capabilities, for the source/target dropdowns.
+
+    Each entry: {name, display_name, source, target}. The UI filters `source:true`
+    into the Source dropdown and `target:true` into the Target dropdown.
+    """
+    return {"frameworks": list_frameworks_detailed()}
 
 
 @app.get("/api/health")
@@ -81,15 +88,12 @@ def health() -> dict:
 def convert(request: ConvertRequest) -> Response:
     if not request.files:
         raise HTTPException(status_code=400, detail="No files were uploaded.")
-    if not request.framework_files:
-        raise HTTPException(
-            status_code=400,
-            detail="Upload the target framework folder (with vocabulary.json).",
-        )
     payload = [f.model_dump() for f in request.files]
     pack = [f.model_dump() for f in request.framework_files]
     try:
-        zip_bytes = convert_folder(payload, request.mode, request.target, pack)
+        zip_bytes = convert_folder(
+            payload, request.mode, request.target, pack, source=request.source
+        )
     except (ScannerError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # noqa: BLE001 - surface failures to the UI
@@ -106,14 +110,11 @@ def convert_path(request: ConvertPathRequest) -> Response:
     """
     if not request.path.strip():
         raise HTTPException(status_code=400, detail="No folder path provided.")
-    if not request.framework_files:
-        raise HTTPException(
-            status_code=400,
-            detail="Upload the target framework folder (with vocabulary.json).",
-        )
     pack = [f.model_dump() for f in request.framework_files]
     try:
-        zip_bytes = convert_local_path(request.path, request.mode, request.target, pack)
+        zip_bytes = convert_local_path(
+            request.path, request.mode, request.target, pack, source=request.source
+        )
     except (ScannerError, NotADirectoryError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # noqa: BLE001
@@ -125,7 +126,7 @@ def _zip_response(zip_bytes: bytes) -> Response:
     return Response(
         content=zip_bytes,
         media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="converted_maf_agent.zip"'},
+        headers={"Content-Disposition": 'attachment; filename="converted_agent.zip"'},
     )
 
 

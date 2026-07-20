@@ -1,0 +1,255 @@
+{
+  "_meta": {
+    "framework": "CrewAI",
+    "pypi_package": "crewai",
+    "import_root": "crewai",
+    "version_tested": "latest",
+    "purpose": "Machine-readable knowledge pack consumed by Tier-1 adapters and Tier-2 templates, and to ground Tier-3 generation. Keys are neutral-IR / typical-source concepts; values are the authoritative CrewAI equivalents. Parsing of CrewAI-as-SOURCE lives in the CrewAI source adapter; this file also documents CrewAI as a conversion TARGET.",
+    "source_framework": "neutral-ir"
+  },
+
+  "display_name": "CrewAI",
+  "supports_source": true,
+  "supports_target": true,
+
+  "primitives": {
+    "Graph_or_pipeline": {
+      "crewai_equivalent": "Crew (linear) or Flow (branching/loops)",
+      "import": "from crewai import Crew, Process, Flow",
+      "notes": "A linear step pipeline maps to a sequential Crew. A graph with conditional edges, loops, or routers maps to a Flow that may drive one or more Crews. Do NOT flatten a branching graph into a linear Crew."
+    },
+    "Crew": {
+      "crewai_equivalent": "Crew",
+      "import": "from crewai import Crew, Process",
+      "pattern": "Crew(agents=[...], tasks=[...], process=Process.sequential, verbose=True)",
+      "notes": "A team of Agents executing a list of Tasks under a Process."
+    },
+    "Flow": {
+      "crewai_equivalent": "Flow",
+      "import": "from crewai.flow.flow import Flow, start, listen, router, or_, and_",
+      "pattern": "class MyFlow(Flow[StateModel]):\n    @start()\n    def begin(self): ...",
+      "notes": "Event-driven controller with @start/@listen/@router and typed/dict state. Use for explicit control flow."
+    },
+    "ReactAgent": {
+      "crewai_equivalent": "one Agent + one Task in a small Crew",
+      "import": "from crewai import Agent, Task, Crew",
+      "notes": "A single tool-looping LLM agent maps to a single Agent assigned to a single Task in a one-task Crew."
+    }
+  },
+
+  "state": {
+    "graph_state_TypedDict": {
+      "crewai_equivalent": "Flow state: a pydantic.BaseModel parameterising Flow[StateModel] (or an unstructured dict)",
+      "import": "from pydantic import BaseModel\nfrom crewai.flow.flow import Flow",
+      "notes": "Graph-level TypedDict state becomes the Flow state model accessed via self.state. Plain Crews have no global mutable state; data flows through Task outputs and context=[...].",
+      "pattern": "class SuiteState(BaseModel):\n    suite_path: str = ''\n    score: float = 0.0\n    retries: int = 0\n\nclass MyFlow(Flow[SuiteState]):\n    ..."
+    },
+    "task_output_dependency": {
+      "crewai_equivalent": "Task(context=[upstream_task, ...])",
+      "notes": "Data dependencies between steps are expressed by listing upstream Task objects in a downstream Task's context. This replaces reading fields off a shared state dict.",
+      "pattern": "report_task = Task(description='...', expected_output='...', agent=writer, context=[coverage_task, redundancy_task])"
+    },
+    "Annotated_list_add": {
+      "crewai_equivalent": "plain list field on the Flow state model + .append()",
+      "notes": "Drop Annotated and operator.add entirely. Carry the list on the Flow state model and append directly.",
+      "anti_pattern": "from operator import add",
+      "pattern": "self.state.audit_log.append(entry)"
+    }
+  },
+
+  "nodes": {
+    "node_function": {
+      "signature_source": "def node(state: dict) -> dict",
+      "crewai_equivalent": "a Task executed by an Agent",
+      "imports": "from crewai import Agent, Task",
+      "return_convention": "Do not return a dict. Define a Task with description + expected_output, assign an agent, and add it to a Crew. Use output_pydantic/output_json to get typed results.",
+      "pattern": "analyse_task = Task(\n    description='Analyse the suite at {suite_path} and find gaps.',\n    expected_output='A JSON object with a score and a list of gaps.',\n    agent=analyst,\n    context=[intake_task],\n    output_pydantic=CoverageReport,\n)",
+      "required_fields": ["description", "expected_output"],
+      "notes": "expected_output is REQUIRED. Every Task must be added to a Crew(tasks=[...]) or produced inside a Flow method."
+    },
+    "agent": {
+      "crewai_equivalent": "Agent",
+      "import": "from crewai import Agent",
+      "required_fields": ["role", "goal", "backstory"],
+      "pattern": "researcher = Agent(\n    role='Senior Test Analyst',\n    goal='Identify flaky and redundant tests',\n    backstory='A meticulous QA engineer who reads CI history.',\n    tools=[history_tool],\n    llm=LLM(model='openai/gpt-4o'),\n    allow_delegation=False,\n    verbose=True,\n)",
+      "notes": "role/goal/backstory are required and form the system prompt. An Agent does nothing until assigned to a Task in a Crew."
+    },
+    "final_node": {
+      "crewai_equivalent": "the last Task in the Crew's task list (its output is the crew result)",
+      "notes": "Set output_pydantic/output_json on the final Task to type the crew result. Access via result.pydantic / result.json_dict / result.raw."
+    }
+  },
+
+  "edges": {
+    "sequential_edge": {
+      "source_api": "builder.add_edge('a', 'b')",
+      "crewai_api": "order of Tasks in Crew(tasks=[a, b, ...]) with Process.sequential",
+      "notes": "Tasks run in list order; each implicitly receives the previous task's output. There is no explicit edge API in a Crew."
+    },
+    "dag_dependency": {
+      "source_api": "multiple predecessors feeding one node",
+      "crewai_api": "Task(context=[upstream_a, upstream_b])",
+      "notes": "Lists the specific upstream Task objects whose outputs are injected as context into the downstream Task."
+    },
+    "conditional_edge": {
+      "source_api": "builder.add_conditional_edges('node', router_fn, {label: 'target'})",
+      "crewai_api": "Flow @router returning a string label -> @listen('label')",
+      "notes": "Conditional branching is NOT possible in a plain Crew. Use a Flow. Every label a router can return must have a matching @listen.",
+      "pattern": "@router(analyse)\ndef route(self):\n    if self.state.passed:\n        return 'approve'\n    return 'retry'\n\n@listen('approve')\ndef approve(self): ...\n\n@listen('retry')\ndef retry(self): ..."
+    },
+    "cycle_loop": {
+      "source_pattern": "graph with a cycle (node A -> node B -> node A)",
+      "crewai_pattern": "Flow @router that loops back to an earlier method, guarded by a state counter",
+      "pattern": "@router(analyse)\ndef route(self):\n    if self.state.passed:\n        return 'done'\n    if self.state.retries < MAX:\n        self.state.retries += 1\n        return 'retry'\n    return 'escalate'",
+      "notes": "Always guard the loop with an iteration cap on the Flow state to guarantee termination."
+    },
+    "fan_out_fan_in": {
+      "crewai_api": "Flow: multiple @listen on one trigger for fan-out; @listen(and_(a, b)) to join; or crew.kickoff_for_each(inputs=[...]) for data-parallel batches",
+      "notes": "or_(a, b) fires when any trigger completes; and_(a, b) waits for all."
+    },
+    "hierarchical_delegation": {
+      "crewai_api": "Crew(process=Process.hierarchical, manager_llm=LLM(...)) or manager_agent=...",
+      "notes": "A manager agent dynamically assigns/delegates tasks to worker agents instead of following static list order. Worker Tasks may omit agent=."
+    }
+  },
+
+  "tools": {
+    "tool_decorator": {
+      "source_decorator": "@tool",
+      "crewai_equivalent": "@tool from crewai.tools (returns a ready tool instance)",
+      "import": "from crewai.tools import tool",
+      "registration": "Pass the decorated object directly in Agent(tools=[...]) or Task(tools=[...]).",
+      "pattern": "@tool('CI History Lookup')\ndef get_history(test_id: str) -> str:\n    \"\"\"Return CI run stats for a single test id.\"\"\"\n    return str(_load(test_id))",
+      "notes": "The decorated function IS the tool instance; pass it directly."
+    },
+    "base_tool_class": {
+      "crewai_equivalent": "subclass BaseTool, implement _run, then INSTANTIATE",
+      "import": "from crewai.tools import BaseTool\nfrom pydantic import BaseModel, Field",
+      "pattern": "class CIHistoryTool(BaseTool):\n    name: str = 'CI History Lookup'\n    description: str = 'Return CI run stats for a test id.'\n    args_schema: Type[BaseModel] = HistoryInput\n    def _run(self, test_id: str) -> str:\n        return str(_load(test_id))\n\nhistory_tool = CIHistoryTool()  # instantiate!",
+      "anti_pattern": "Passing the class (CIHistoryTool) instead of an instance (CIHistoryTool()) in tools=[...]; or a BaseTool subclass never instantiated/assigned.",
+      "notes": "Always pass instances, not classes. args_schema arg names must match _run parameters."
+    },
+    "prebuilt_tools": {
+      "crewai_equivalent": "crewai_tools package",
+      "import": "from crewai_tools import SerperDevTool, FileReadTool, ScrapeWebsiteTool",
+      "pattern": "search_tool = SerperDevTool()",
+      "notes": "Requires the crewai-tools dependency. Some tools need their own API keys (e.g. SERPER_API_KEY)."
+    }
+  },
+
+  "hitl": {
+    "human_input": {
+      "source_api": "interrupt(payload)",
+      "crewai_equivalent": "Task(human_input=True)",
+      "pattern": "approve_task = Task(\n    description='Propose which flaky tests to quarantine.',\n    expected_output='A list of test ids to quarantine, with reasons.',\n    agent=analyst,\n    human_input=True,\n)",
+      "flow_alternative": "For programmatic HITL, run one crew, inspect result, then branch with a Flow @router on the human decision and kick off the next crew.",
+      "notes": "human_input pauses at the TASK boundary after the agent responds; the human reviews/approves and feedback is fed back. Never implement HITL as auto-approve-only with real logic commented out."
+    }
+  },
+
+  "checkpointing": {
+    "note": "CrewAI has NO MAF-style per-step checkpoint / resume-from-checkpoint. Map source checkpointers to Crew memory (cross-run recall), and model true pause/resume as separate crew.kickoff() calls orchestrated by a Flow.",
+    "memory": {
+      "source_equivalent": "MemorySaver / FileCheckpointStorage",
+      "crewai_equivalent": "Crew(memory=True)",
+      "pattern": "Crew(agents=[...], tasks=[...], process=Process.sequential, memory=True)",
+      "notes": "Enables short-term (within run), long-term (persisted across runs, SQLite by default), and entity memory. This is recall, NOT a resumable step checkpoint."
+    },
+    "knowledge": {
+      "crewai_equivalent": "Crew(knowledge_sources=[...])",
+      "import": "from crewai.knowledge.source.string_knowledge_source import StringKnowledgeSource",
+      "pattern": "policy = StringKnowledgeSource(content='Pinned tests are never removed.')\nCrew(agents=[...], tasks=[...], knowledge_sources=[policy])",
+      "notes": "Attach reference material the crew can retrieve from during execution."
+    }
+  },
+
+  "invocation": {
+    "graph.invoke": {
+      "crewai_equivalent": "crew.kickoff(inputs={...})",
+      "notes": "inputs fill {placeholders} in task descriptions. Read result.raw / result.pydantic / result.json_dict."
+    },
+    "batched_invoke": {
+      "crewai_equivalent": "crew.kickoff_for_each(inputs=[{...}, {...}])",
+      "notes": "One crew run per input dict; returns a list of results."
+    },
+    "async_invoke": {
+      "crewai_equivalent": "await crew.kickoff_async(inputs={...}) / await crew.kickoff_for_each_async(inputs=[...])"
+    },
+    "flow.invoke": {
+      "crewai_equivalent": "flow.kickoff() / await flow.kickoff_async()"
+    }
+  },
+
+  "providers": {
+    "notes": "CrewAI uses LiteLLM under the hood; the provider is selected by the model string on LLM(model=...). If no llm is passed to an Agent, the default model from environment is used. Prefer an explicit LLM(model=...).",
+    "openai": {
+      "import": "from crewai import LLM",
+      "model": "openai/gpt-4o",
+      "env_vars": ["OPENAI_API_KEY", "OPENAI_MODEL_NAME"]
+    },
+    "azure_openai": {
+      "import": "from crewai import LLM",
+      "model": "azure/<deployment-name>",
+      "env_vars": ["AZURE_API_KEY", "AZURE_API_BASE", "AZURE_API_VERSION"]
+    },
+    "anthropic": {
+      "import": "from crewai import LLM",
+      "model": "anthropic/claude-3-5-sonnet",
+      "env_vars": ["ANTHROPIC_API_KEY"]
+    },
+    "gemini": {
+      "import": "from crewai import LLM",
+      "model": "gemini/gemini-1.5-pro",
+      "env_vars": ["GEMINI_API_KEY"]
+    }
+  },
+
+  "reject_list": {
+    "description": "Any generated output containing the following is a conversion error.",
+    "items": [
+      "WorkflowBuilder",
+      "Executor (as MAF base class)",
+      "@executor",
+      "@handler",
+      "WorkflowContext",
+      "RequestInfoExecutor",
+      "agent-framework in requirements.txt",
+      "from langgraph",
+      "StateGraph(",
+      "add_node(",
+      "add_conditional_edges(",
+      "from operator import add",
+      "Annotated[list, add]",
+      "interrupt(",
+      "@kernel_function",
+      "Kernel()",
+      "semantic-kernel in requirements.txt",
+      "Task constructed but never added to a Crew(tasks=[...]) or produced by a Flow",
+      "BaseTool subclass never instantiated or never assigned to an agent",
+      "passing a tool class instead of an instance in tools=[...]",
+      "plain sequential Crew used where source had conditional branching or loops (needs a Flow)",
+      "Flow @router label that no @listen responds to",
+      "Task missing required expected_output",
+      "Agent missing role/goal/backstory",
+      "HITL as auto-approve-only with real logic in comments",
+      "stdlib module in requirements.txt (json, os, io, sys, re, math, hashlib, pathlib)"
+    ]
+  },
+
+  "dependencies": {
+    "required": ["crewai"],
+    "optional_by_feature": {
+      "tools": "crewai-tools",
+      "env_loading": "python-dotenv",
+      "typed_outputs": "pydantic",
+      "web_search_tool": "crewai-tools",
+      "serving": "uvicorn",
+      "api": "fastapi"
+    },
+    "never_include_in_requirements": [
+      "json", "os", "io", "sys", "re", "math",
+      "hashlib", "uuid", "typing", "dataclasses", "functools",
+      "subprocess", "logging", "datetime", "pathlib", "operator"
+    ]
+  }
+}

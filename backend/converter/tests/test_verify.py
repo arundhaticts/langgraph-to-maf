@@ -24,7 +24,7 @@ def test_clean_output_passes_all_checks(tmp_path):
         "requirements_clean",
         "all_nodes_generated",
         "all_tools_generated",
-        "workflow_assembled",
+        "target_shape_present",
     } <= names
 
 

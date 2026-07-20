@@ -6,19 +6,18 @@ Responsibilities (Section 11, Module 1 of the build plan):
   one `.py` file. Hard-stop with a clear message otherwise -- it must NOT let a
   half-valid repo through to the parser.
 - Tag every file by type into a `RepoManifest`.
-- Auto-detect the source framework by scanning imports (LangGraph today; the
-  detection table is a registry so more source frameworks drop in later).
+- Auto-detect the source framework by scanning imports and asking each
+  registered `SourceAdapter.detect()` for its confidence (Section 16).
 
 This module is framework-agnostic by construction: it produces the frozen
 `RepoManifest` contract and knows nothing about the target framework or the
 conversion approach. All three approaches (Deterministic / Full LLM / Hybrid)
 start here.
 
-The framework-detection signatures live in `SOURCE_FRAMEWORK_SIGNATURES` for now.
-When the source-adapter layer is built (Section 16, "any framework -> any
-framework"), each `SourceAdapter.detect()` will own its own signature and this
-table becomes a thin loop over the registered adapters -- no caller changes,
-because detection stays behind `scan_repo`.
+Framework detection now lives behind the source-adapter registry: `scan_repo`
+collects the imported module roots across the repo and delegates to
+`detect_source_framework`, which scores every registered adapter. Adding a
+source adapter is enough to make its framework detectable -- no changes here.
 """
 
 from __future__ import annotations
@@ -26,6 +25,7 @@ from __future__ import annotations
 import ast
 import os
 
+from converter.adapters import detect_source_framework
 from converter.config import Config
 from converter.contracts import (
     FileEntry,
@@ -63,18 +63,6 @@ _IGNORED_DIRS = frozenset(
         ".egg-info",
     }
 )
-
-# Import roots that identify a source framework, keyed by framework name.
-# Detection matches the top-level module of any `import X` / `from X import ...`.
-# Add a new source framework by adding a row here (or, later, a SourceAdapter).
-SOURCE_FRAMEWORK_SIGNATURES: dict[str, tuple[str, ...]] = {
-    "langgraph": ("langgraph",),
-    # Future source frameworks (scaffolding for scaling; not yet supported):
-    # "crewai": ("crewai",),
-    # "autogen": ("autogen", "autogen_agentchat", "autogen_core"),
-    # "semantic_kernel": ("semantic_kernel",),
-}
-
 
 def _classify_file(relative_path: str, config: Config) -> FileType:
     """Map a file to its `FileType`. `relative_path` uses OS separators."""
@@ -146,7 +134,9 @@ def _imported_roots(python_source: str) -> set[str]:
 def _detect_framework(input_root: str, python_files: list[FileEntry]) -> str | None:
     """Scan imports across all Python files and match a known framework.
 
-    Returns the framework name (e.g. "langgraph") or None if none matched.
+    Collects the imported module roots repo-wide and delegates scoring to the
+    source-adapter registry. Returns the framework name (e.g. "langgraph") or
+    None if no adapter matched.
     """
     seen_roots: set[str] = set()
     for entry in python_files:
@@ -158,10 +148,7 @@ def _detect_framework(input_root: str, python_files: list[FileEntry]) -> str | N
             continue
         seen_roots |= _imported_roots(source)
 
-    for framework, signatures in SOURCE_FRAMEWORK_SIGNATURES.items():
-        if any(sig in seen_roots for sig in signatures):
-            return framework
-    return None
+    return detect_source_framework(seen_roots)
 
 
 def scan_repo(input_root: str, config: Config | None = None) -> RepoManifest:

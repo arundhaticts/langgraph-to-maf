@@ -1,0 +1,225 @@
+{
+  "_meta": {
+    "framework": "AWS Strands",
+    "pypi_package": "strands-agents",
+    "import_root": "strands",
+    "purpose": "Machine-readable knowledge pack for AWS Strands as a conversion SOURCE. Keys describe native Strands constructs and how each maps to the neutral IR when parsed. Parsing lives in AWSStrandsSourceAdapter (adapters/source/aws_strands_adapter.py): Agent(tools=[...]) -> one SINGLE_AGENT node; @tool fns -> node tools; model ctor -> node config; Swarm/Graph/workflow -> multiple agent nodes. This file exposes the framework to the UI and grounds Tier 3. No Strands target generator exists yet."
+  },
+
+  "display_name": "AWS Strands",
+  "supports_source": true,
+  "supports_target": true,
+
+  "primitives": {
+    "Agent": {
+      "import": "from strands import Agent",
+      "ir_equivalent": "single SINGLE_AGENT node",
+      "constructor": "Agent(model=..., tools=[...], system_prompt='...')",
+      "notes": "The one central primitive: a model-driven tool-calling loop. Callable directly (agent('prompt')). A lone Agent(tools=[...]) is ONE node, never a multi-node graph. Default model provider is Amazon Bedrock.",
+      "key_args": ["model", "tools", "system_prompt", "messages", "conversation_manager", "session_manager", "hooks", "callback_handler"]
+    },
+    "agentic_loop": {
+      "ir_equivalent": "the node's execution semantics",
+      "notes": "Model decides control flow: call model -> optional tool-use requests -> Strands runs tools -> feed results back -> repeat until final answer. No author-declared edges. Collapses to the single node in the IR."
+    },
+    "Swarm": {
+      "import": "from strands.multiagent import Swarm",
+      "ir_equivalent": "multiple agent nodes + handoff orchestration notes",
+      "pattern": "Swarm([agent_a, agent_b], max_handoffs=10, max_iterations=20)",
+      "notes": "Self-organising handoff between agents via a shared handoff tool."
+    },
+    "Graph": {
+      "import": "from strands.multiagent import GraphBuilder",
+      "ir_equivalent": "multiple agent nodes + edges (multi-agent DAG)",
+      "pattern": "b = GraphBuilder(); b.add_node(agent, 'id'); b.add_edge('a', 'b'); b.set_entry_point('a'); graph = b.build()",
+      "notes": "The only author-declared graph in Strands, and it is a graph of AGENTS, not of low-level steps. Edges may carry conditions."
+    },
+    "workflow": {
+      "ir_equivalent": "multiple agent nodes + task-dependency notes",
+      "notes": "Sequences agent tasks with dependencies. Another multi-agent orchestration form."
+    }
+  },
+
+  "state": {
+    "agent_state": {
+      "api": "agent.state.set('key', value) / agent.state.get('key')",
+      "ir_equivalent": "node state/memory config",
+      "notes": "Key/value scratch store NOT part of the model conversation. There is NO global mutable graph-state dict like LangGraph; do not model it as reducer fields on a shared state model."
+    },
+    "request_state": {
+      "notes": "Per-invocation state available to tools/hooks; scoped to a single agent call."
+    },
+    "conversation_manager": {
+      "import": "from strands.agent.conversation_manager import SlidingWindowConversationManager, SummarizingConversationManager, NullConversationManager",
+      "ir_equivalent": "node memory config",
+      "pattern": "Agent(conversation_manager=SlidingWindowConversationManager(window_size=20))",
+      "notes": "Controls context-window trimming. SlidingWindow keeps last N messages; Summarizing summarises older turns; Null disables trimming."
+    }
+  },
+
+  "nodes": {
+    "single_agent": {
+      "source_construct": "Agent(model=, tools=, system_prompt=)",
+      "ir_type": "SINGLE_AGENT",
+      "notes": "The entire core agent, including its full agentic loop and all its tools, is exactly one node. Tools are attached to the node, not modelled as separate nodes.",
+      "pattern": "agent = Agent(model=BedrockModel(model_id='...'), system_prompt='...', tools=[fn_a, fn_b])"
+    }
+  },
+
+  "edges": {
+    "notes": "N/A for a single agent: the model drives control flow inside the agentic loop, so there are NO author-declared edges. Explicit edges exist ONLY in multi-agent orchestration.",
+    "multi_agent_orchestration": {
+      "swarm_handoff": "Agents hand off via a shared handoff tool (Swarm) -> orchestration notes between agent nodes.",
+      "graph_edge": "GraphBuilder.add_edge('a', 'b'), optionally conditional -> edges between agent nodes.",
+      "workflow_dependency": "workflow task dependencies -> task-dependency notes between agent nodes."
+    }
+  },
+
+  "tools": {
+    "@tool": {
+      "source_decorator": "@tool",
+      "import": "from strands import tool",
+      "ir_equivalent": "a tool on the agent node",
+      "registration": "Pass the function object in Agent(tools=[...]).",
+      "pattern": "@tool\ndef get_history(test_id: str, path: str | None = None) -> dict:\n    \"\"\"Return CI run stats for one test.\n\n    Args:\n        test_id: The unique test identifier.\n        path: Optional CI-history JSON file path.\n    \"\"\"\n    ...",
+      "notes": "Strands introspects type hints + docstring (incl. Args:) to build the tool schema. Do not model each tool as its own node."
+    },
+    "prebuilt_tools": {
+      "import": "from strands_tools import calculator, file_read, http_request",
+      "distribution": "strands-agents-tools (import name is strands_tools)",
+      "examples": ["calculator", "file_read", "file_write", "http_request", "python_repl", "shell", "current_time", "use_aws"],
+      "notes": "Import from strands_tools (underscore), NOT from strands. Some (shell, python_repl) execute arbitrary code."
+    },
+    "module_tools": {
+      "notes": "A Python module exposing TOOL_SPEC + matching function can be passed directly (module object or dotted path) without the @tool decorator."
+    },
+    "mcp_tools": {
+      "import": "from strands.tools.mcp import MCPClient",
+      "pattern": "with MCPClient(...) as mcp:\n    agent = Agent(tools=mcp.list_tools_sync())",
+      "notes": "Consume tools from an MCP server. Use the client as a context manager; each MCP tool becomes a tool on the node."
+    },
+    "agent_as_tool": {
+      "pattern": "@tool\ndef research(query: str) -> str:\n    return str(Agent(system_prompt='specialist', tools=[...])(query).message)",
+      "ir_equivalent": "tool edge / delegation note between agent nodes",
+      "notes": "Hierarchical composition: wrap a specialist agent inside a @tool given to an orchestrator agent."
+    }
+  },
+
+  "hitl": {
+    "native_support": false,
+    "reality": "Strands has NO native interrupt/resume primitive (unlike LangGraph interrupt() or MAF RequestInfoExecutor). The agentic loop does not pause itself for a human, and there is no built-in checkpoint-and-await-human mechanism.",
+    "workaround_human_input_tool": {
+      "pattern": "@tool\ndef request_human_approval(summary: str) -> str:\n    \"\"\"Ask a human to approve an action; returns the decision.\"\"\"\n    return get_human_decision(summary)",
+      "notes": "Model calls this tool when it needs a human; the return value flows back into the loop. strands_tools also ships handoff_to_user. Parses as just another tool on the node, flagged as HITL."
+    },
+    "workaround_loop_break": {
+      "notes": "Stop the agent where a human must act, do the human step in host code, then start a new invocation (optionally with a session_manager so the conversation persists across the pause)."
+    },
+    "anti_pattern": "Do NOT emit strands.interrupt(...) or claim Strands natively pauses/resumes. HITL is a human-input tool OR an explicit loop break, and must be described honestly."
+  },
+
+  "checkpointing": {
+    "native_workflow_checkpointing": false,
+    "session_managers": {
+      "import": "from strands.session import FileSessionManager, S3SessionManager",
+      "ir_equivalent": "node state/memory persistence config",
+      "pattern": "Agent(session_manager=FileSessionManager(session_id='user-123'))\nAgent(session_manager=S3SessionManager(session_id='user-123', bucket='my-bucket'))",
+      "notes": "Persist the whole agent session (messages + state) so a conversation survives restarts. This is durability, not a pause/resume-for-HITL checkpoint like MAF's."
+    }
+  },
+
+  "invocation": {
+    "callable_sync": {
+      "api": "result = agent('prompt')",
+      "returns": "AgentResult (final .message, .stop_reason, .metrics)",
+      "notes": "Most common form. Agent instances are callable."
+    },
+    "invoke_async": {
+      "api": "result = await agent.invoke_async('prompt')",
+      "returns": "AgentResult"
+    },
+    "stream_async": {
+      "api": "async for event in agent.stream_async('prompt'): ...",
+      "notes": "Async generator of incremental events (text deltas in event['data'], tool-use events, lifecycle markers)."
+    },
+    "structured_output": {
+      "api": "agent.structured_output(PydanticModel, 'prompt')  # or structured_output_async(...)",
+      "ir_equivalent": "node typed-output schema",
+      "notes": "Runs the loop and returns a validated instance of the Pydantic model."
+    }
+  },
+
+  "providers": {
+    "notes": "Strands is provider-pluggable via strands.models. The model is injected; swap the constructor to change provider. DEFAULT is Amazon Bedrock (a bare Agent() uses Bedrock and needs AWS credentials).",
+    "bedrock": {
+      "import": "from strands.models import BedrockModel",
+      "default": true,
+      "pattern": "BedrockModel(model_id='us.anthropic.claude-sonnet-4-20250514-v1:0', region_name='us-east-1')",
+      "env_vars": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"]
+    },
+    "anthropic": {
+      "import": "from strands.models.anthropic import AnthropicModel",
+      "pattern": "AnthropicModel(model_id='claude-sonnet-4-20250514', max_tokens=1024)",
+      "env_vars": ["ANTHROPIC_API_KEY"]
+    },
+    "openai": {
+      "import": "from strands.models.openai import OpenAIModel",
+      "pattern": "OpenAIModel(model_id='gpt-4o', client_args={'api_key': '...'})",
+      "env_vars": ["OPENAI_API_KEY"]
+    },
+    "litellm": {
+      "import": "from strands.models.litellm import LiteLLMModel",
+      "pattern": "LiteLLMModel(model_id='gemini/gemini-1.5-pro')",
+      "notes": "One interface to 100+ providers."
+    },
+    "ollama": {
+      "import": "from strands.models.ollama import OllamaModel",
+      "pattern": "OllamaModel(host='http://localhost:11434', model_id='llama3')",
+      "notes": "Local inference."
+    }
+  },
+
+  "reject_list": {
+    "description": "Any Strands parsing/output containing the following is an error.",
+    "items": [
+      "strands.interrupt(  (no native interrupt/resume exists)",
+      "Agent.interrupt(  (fabricated)",
+      "claim that Strands natively pauses/resumes for HITL",
+      "from strands import StateGraph  (LangGraph, not Strands)",
+      "add_conditional_edges(  (LangGraph)",
+      "interrupt(  (LangGraph)",
+      "from strands import ChatAgent  (MAF, not Strands)",
+      "WorkflowBuilder  (MAF)",
+      "@ai_function  (MAF)",
+      "Executor / @handler  (MAF)",
+      "from strands import calculator  (prebuilt tools live in strands_tools)",
+      "strands_tools in requirements.txt  (distribution is strands-agents-tools)",
+      "modelling each @tool of one agent as its own IR node",
+      "assuming OpenAI is the default provider  (default is Bedrock)",
+      "@kernel_function / Kernel() / import semantic_kernel  (wrong framework)",
+      "treating a lone Agent(tools=[...]) as a multi-node graph  (it is one SINGLE_AGENT node)",
+      "stdlib module in requirements.txt (json, os, io, re, math, hashlib, uuid, typing)"
+    ]
+  },
+
+  "dependencies": {
+    "required": ["strands-agents"],
+    "optional_by_feature": {
+      "prebuilt_tools": "strands-agents-tools",
+      "anthropic_provider": "strands-agents[anthropic]",
+      "openai_provider": "strands-agents[openai]",
+      "litellm_provider": "strands-agents[litellm]",
+      "ollama_provider": "strands-agents[ollama]",
+      "mcp_tools": "mcp",
+      "structured_output": "pydantic",
+      "env_loading": "python-dotenv",
+      "aws_bedrock": "boto3"
+    },
+    "never_include_in_requirements": [
+      "strands_tools",
+      "json", "os", "sys", "io", "re", "math",
+      "hashlib", "uuid", "typing", "dataclasses", "functools",
+      "subprocess", "logging", "datetime", "pathlib", "operator"
+    ]
+  }
+}

@@ -1,0 +1,245 @@
+{
+  "_meta": {
+    "framework": "LangGraph",
+    "pypi_package": "langgraph",
+    "import_root": "langgraph",
+    "version_tested": "latest",
+    "purpose": "Machine-readable term map consumed by Tier-1 adapters and Tier-2 templates. Documents LangGraph both as a conversion TARGET (idioms to generate) and as a SOURCE (constructs to map into the neutral IR). Values are the authoritative LangGraph equivalents."
+  },
+
+  "display_name": "LangGraph",
+  "supports_source": true,
+  "supports_target": true,
+
+  "primitives": {
+    "StateGraph": {
+      "langgraph_equivalent": "StateGraph",
+      "import": "from langgraph.graph import StateGraph, START, END",
+      "pattern": "builder = StateGraph(State)\nbuilder.add_node('a', a)\nbuilder.add_edge(START, 'a')\ngraph = builder.compile()",
+      "notes": "The core primitive: a graph you build yourself. Use for any source with named steps, branching, loops, HITL, or custom state. Do NOT collapse a multi-node graph into a single create_react_agent."
+    },
+    "CompiledGraph": {
+      "langgraph_equivalent": "graph = builder.compile()",
+      "import": "from langgraph.graph import StateGraph",
+      "notes": "The runnable returned by builder.compile(); exposes .invoke/.stream/.ainvoke/.astream. Pass checkpointer=... and/or store=... to compile()."
+    },
+    "ReactAgent": {
+      "langgraph_equivalent": "create_react_agent",
+      "import": "from langgraph.prebuilt import create_react_agent",
+      "pattern": "agent = create_react_agent(model, tools=[...])",
+      "notes": "Prebuilt graph for a single tool-calling ReAct agent. Only use when the source truly is one agent with no bespoke control flow."
+    }
+  },
+
+  "state": {
+    "TypedDict": {
+      "langgraph_equivalent": "TypedDict / Pydantic BaseModel / dataclass state schema",
+      "import": "from typing import Annotated, TypedDict",
+      "notes": "State is a schema passed to StateGraph(State). Nodes receive the full state and return a PARTIAL dict of changed keys. Pydantic BaseModel adds runtime validation.",
+      "pattern": "class State(TypedDict):\n    topic: str\n    score: float\n    messages: Annotated[list, add_messages]"
+    },
+    "MessagesState": {
+      "langgraph_equivalent": "MessagesState",
+      "import": "from langgraph.graph import MessagesState",
+      "notes": "Prebuilt TypedDict with a single messages: Annotated[list, add_messages] field. Subclass to add your own keys.",
+      "pattern": "class State(MessagesState):\n    remaining_steps: int"
+    },
+    "Annotated[list, add]": {
+      "langgraph_equivalent": "Annotated[list, operator.add] (or Annotated[list, add_messages] for chat)",
+      "import": "import operator\nfrom langgraph.graph.message import add_messages",
+      "notes": "A reducer. Nodes return only the DELTA; the reducer concatenates it onto the existing value. No reducer means last-write-wins (replace).",
+      "pattern": "audit_log: Annotated[list[dict], operator.add]\nmessages: Annotated[list, add_messages]"
+    },
+    "reducer_return_rule": {
+      "notes": "For a reducer key, return the new items only (e.g. {'audit_log': [one_entry]}), NEVER the whole accumulated list. Returning the full list double-appends every step."
+    }
+  },
+
+  "nodes": {
+    "node_function": {
+      "signature": "def node(state: State) -> dict   (or async def; optional second config arg)",
+      "import": "# plain function; add via builder.add_node('name', node)",
+      "return_convention": "Return a PARTIAL dict of ONLY the keys this node changed. Do NOT return the whole state object or a bare value. Keys omitted are left unchanged.",
+      "pattern": "def analyse(state: State) -> dict:\n    gaps = find_gaps(state['suite'])\n    return {'coverage_gaps': gaps, 'audit_log': [{'node': 'analyse'}]}",
+      "config_access": "def node(state, config):\n    thread_id = config['configurable']['thread_id']",
+      "anti_pattern": "return state  # returning the whole mutated state object"
+    },
+    "add_node": {
+      "langgraph_api": "builder.add_node('name', node_fn)  # or builder.add_node(node_fn) to infer name",
+      "notes": "Nodes are referenced by string name in edges."
+    },
+    "command_node": {
+      "langgraph_equivalent": "return Command(update=..., goto=...)",
+      "import": "from langgraph.types import Command",
+      "notes": "A node that both updates state and picks the next hop. With goto set you do not need static out-edges. Primary tool for multi-agent handoffs.",
+      "pattern": "def supervisor(state) -> Command[Literal['researcher', '__end__']]:\n    return Command(update={'log': [x]}, goto='researcher')"
+    }
+  },
+
+  "edges": {
+    "add_edge": {
+      "source_api": "builder.add_edge('a', 'b')",
+      "langgraph_api": "builder.add_edge('a', 'b')",
+      "notes": "Unconditional edge. Nodes referenced by string name. Use START/END sentinels for entry/terminal.",
+      "imports": "from langgraph.graph import START, END",
+      "pattern": "builder.add_edge(START, 'intake')\nbuilder.add_edge('intake', 'analyse')\nbuilder.add_edge('report', END)"
+    },
+    "add_conditional_edges": {
+      "langgraph_api": "builder.add_conditional_edges('node', router_fn, mapping)",
+      "notes": "router_fn(state) returns a node name (or a key mapped by the optional dict). May return END, or a list of names to fan out. Mapping dict is optional.",
+      "pattern": "def route(s):\n    if s['passed']: return 'approve'\n    return 'retry' if s['retries'] < MAX else 'drop'\nbuilder.add_conditional_edges('validate', route, {'approve': 'approve', 'retry': 'gap_gen', 'drop': 'drop'})"
+    },
+    "cycle_loop": {
+      "source_pattern": "graph with a cycle (node A -> node B -> node A)",
+      "langgraph_pattern": "back-edge plus a conditional edge whose guard is the iteration cap",
+      "pattern": "builder.add_edge('gap_gen', 'validate')\nbuilder.add_conditional_edges('validate',\n    lambda s: 'gap_gen' if (not s['passed'] and s['retries'] < MAX) else 'done',\n    {'gap_gen': 'gap_gen', 'done': END})",
+      "notes": "Always include a termination guard. recursion_limit in the invoke config is a backstop; hitting it raises GraphRecursionError."
+    },
+    "fan_out_send": {
+      "langgraph_api": "return [Send('worker', substate) for x in items]",
+      "import": "from langgraph.types import Send",
+      "notes": "Dynamic parallel map-reduce dispatch from a conditional edge. Multiple static out-edges also run in parallel; updates merge via reducers at the join."
+    }
+  },
+
+  "tools": {
+    "@tool": {
+      "source_decorator": "@tool",
+      "langgraph_equivalent": "@tool (LangChain Core)",
+      "import": "from langchain_core.tools import tool",
+      "registration": "Bind to a model with llm.bind_tools([...]) and/or execute via ToolNode([...]).",
+      "pattern": "@tool\ndef get_history(test_id: str, path: str | None = None) -> dict | None:\n    \"\"\"Look up CI evidence for a single test.\"\"\"\n    ...",
+      "notes": "Signature + docstring become the tool schema. Do not emit dead tool-wrapper classes."
+    },
+    "bind_tools": {
+      "langgraph_api": "llm_with_tools = llm.bind_tools([tool_a, tool_b])",
+      "notes": "Attaches tool schemas to the chat model so it can emit tool calls on the AIMessage."
+    },
+    "ToolNode": {
+      "langgraph_api": "builder.add_node('tools', ToolNode([tool_a, tool_b]))",
+      "import": "from langgraph.prebuilt import ToolNode, tools_condition",
+      "notes": "Prebuilt node that runs the tool calls on the last AIMessage and appends ToolMessages. Pair with tools_condition router and a 'tools' -> 'model' back-edge to form the ReAct loop.",
+      "pattern": "builder.add_conditional_edges('model', tools_condition)\nbuilder.add_edge('tools', 'model')"
+    }
+  },
+
+  "hitl": {
+    "interrupt": {
+      "source_api": "interrupt(payload)",
+      "langgraph_equivalent": "interrupt(payload) inside a node; resume with Command(resume=value)",
+      "import": "from langgraph.types import interrupt, Command",
+      "requires": "A checkpointer + config={'configurable': {'thread_id': ...}}. Without them the interrupt cannot resume.",
+      "pattern_node": "def approve(state) -> dict:\n    if state['run_mode'] == 'automated':\n        return {'approved': state['recommended']}\n    human = interrupt({'question': 'Approve?', 'recommended': state['recommended']})\n    return {'approved': human if human is not None else state['recommended']}",
+      "pattern_resume": "result = graph.invoke(inputs, config)\nif '__interrupt__' in result:\n    payload = result['__interrupt__'][0].value\n    decision = present_to_human(payload)\n    result = graph.invoke(Command(resume=decision), config)",
+      "static_interrupt": "graph = builder.compile(checkpointer=saver, interrupt_before=['approve'])  # or interrupt_after=[...]; resume with graph.invoke(None, config); optionally graph.update_state(config, {...}) first",
+      "notes": "Always keep an automated fast-path. Never implement HITL as auto-approve-only with real logic commented out."
+    }
+  },
+
+  "checkpointing": {
+    "MemorySaver": {
+      "langgraph_equivalent": "MemorySaver (in-process) / SqliteSaver / PostgresSaver",
+      "import": "from langgraph.checkpoint.memory import MemorySaver",
+      "pattern": "graph = builder.compile(checkpointer=MemorySaver())\nconfig = {'configurable': {'thread_id': 'user-42'}}\ngraph.invoke(inputs, config)",
+      "persistent_imports": "from langgraph.checkpoint.sqlite import SqliteSaver\nfrom langgraph.checkpoint.postgres import PostgresSaver",
+      "notes": "Saves state per superstep keyed by thread_id. Every stateful invoke MUST pass the thread_id config. Inspect/rewind with get_state / get_state_history / update_state. SqliteSaver/PostgresSaver are context managers or need .setup()."
+    },
+    "Store": {
+      "langgraph_equivalent": "Store for long-term, cross-thread memory",
+      "import": "from langgraph.store.memory import InMemoryStore",
+      "pattern": "graph = builder.compile(checkpointer=MemorySaver(), store=InMemoryStore())\n# in a node: store.put((ns,), key, value); store.get((ns,), key)",
+      "notes": "Checkpointer = per-thread state. Store = memory shared across threads."
+    }
+  },
+
+  "invocation": {
+    "graph.invoke": {
+      "langgraph_equivalent": "graph.invoke(state, config)",
+      "notes": "Runs to completion, returns the final state dict."
+    },
+    "graph.stream": {
+      "langgraph_equivalent": "for chunk in graph.stream(state, config, stream_mode='updates'): ...",
+      "notes": "stream_mode: 'values' (full state), 'updates' (per-node deltas), 'messages' (LLM tokens), 'custom'. Pass a list to combine."
+    },
+    "graph.ainvoke": {
+      "langgraph_equivalent": "await graph.ainvoke(state, config)"
+    },
+    "graph.astream": {
+      "langgraph_equivalent": "async for chunk in graph.astream(state, config, stream_mode='messages'): ..."
+    }
+  },
+
+  "providers": {
+    "notes": "LangGraph is model-agnostic; inject a LangChain chat model. Swap the constructor to change provider; the graph is unchanged. .bind_tools works on any tool-calling chat model.",
+    "openai": {
+      "import": "from langchain_openai import ChatOpenAI",
+      "pattern": "llm = ChatOpenAI(model='gpt-4o', temperature=0)",
+      "pip": "langchain-openai",
+      "env_vars": ["OPENAI_API_KEY"]
+    },
+    "anthropic": {
+      "import": "from langchain_anthropic import ChatAnthropic",
+      "pattern": "llm = ChatAnthropic(model='claude-3-5-sonnet-latest')",
+      "pip": "langchain-anthropic",
+      "env_vars": ["ANTHROPIC_API_KEY"]
+    },
+    "init_chat_model": {
+      "import": "from langchain.chat_models import init_chat_model",
+      "pattern": "llm = init_chat_model('openai:gpt-4o')  # or 'anthropic:claude-3-5-sonnet-latest'",
+      "notes": "Provider-agnostic factory; selects the integration from the model string."
+    }
+  },
+
+  "reject_list": {
+    "description": "Any generated output containing the following is a conversion error when LangGraph is the TARGET.",
+    "items": [
+      "from agent_framework",
+      "WorkflowBuilder",
+      "@executor",
+      "class ... (Executor)",
+      "WorkflowContext",
+      "ctx.send_message",
+      "ctx.yield_output",
+      "RequestInfoExecutor",
+      "RequestInfoMessage",
+      "from crewai",
+      "Crew(",
+      "Task(",
+      "Agent(role=",
+      "Process.sequential",
+      "AssistantAgent",
+      "GroupChat",
+      "initialize_agent",
+      "AgentExecutor",
+      "LLMChain",
+      "node returning the whole mutated state object instead of a partial dict",
+      "returning the full accumulated list for a reducer key instead of the delta",
+      "router function defined but never wired into add_conditional_edges",
+      "collapsing a multi-node graph into a single create_react_agent call",
+      "interrupt( without a checkpointer + thread_id config",
+      "HITL as auto-approve-only with real logic in comments",
+      "compile(checkpointer=...) then invoking without thread_id config",
+      "cycle with no termination guard / iteration cap",
+      "stdlib module in requirements.txt (json, os, io, operator, typing, dataclasses, functools)"
+    ]
+  },
+
+  "dependencies": {
+    "required": ["langgraph"],
+    "optional_by_feature": {
+      "openai_models": "langchain-openai",
+      "anthropic_models": "langchain-anthropic",
+      "init_chat_model": "langchain",
+      "sqlite_checkpoint": "langgraph-checkpoint-sqlite",
+      "postgres_checkpoint": "langgraph-checkpoint-postgres",
+      "serving": "uvicorn",
+      "api": "fastapi",
+      "env_loading": "python-dotenv"
+    },
+    "never_include_in_requirements": [
+      "json", "os", "io", "sys", "re", "math",
+      "hashlib", "uuid", "typing", "dataclasses", "functools",
+      "subprocess", "logging", "datetime", "pathlib", "operator"
+    ]
+  }
+}

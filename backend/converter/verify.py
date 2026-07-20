@@ -3,11 +3,21 @@
 Runs AFTER generation and diffs the emitted package against the IR: every IR
 node, tool, and HITL point must have a corresponding artifact in the output;
 every generated .py must compile; and the output must be free of source-framework
-residue (langgraph / semantic-kernel / raw interrupt() / TypedDict state / ...).
+residue.
 
 `verify_output` returns an `AcceptanceReport`; the pipeline writes it to
 ACCEPTANCE.md and routes any failures into the migration report's needs-review.
 It never raises -- a failed check is data, not an exception.
+
+Phase 10 checks (target-parameterized)
+---------------------------------------
+1. All generated .py files compile (ast.parse).
+2. Per-target forbidden tokens absent from generated code (reject list).
+3. requirements.txt is clean of forbidden packages.
+4. IR coverage: every node / tool / HITL point has an artifact.
+5. Per-target required symbols present in orchestrator.py (shape proof).
+6. Loop reachability: every LoopGuard's loop_node appears in the orchestrator.
+7. subprocess runnable checks (opt-in via validate_output flag).
 """
 
 from __future__ import annotations
@@ -17,25 +27,134 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from typing import Optional
 
 from converter.contracts import IR, NodeRole
 
-# Tokens that must NOT survive into the generated .py files.
-_FORBIDDEN_CODE_TOKENS = (
+_SENTINELS = frozenset({"START", "END", "__start__", "__end__"})
+
+# ---------------------------------------------------------------------------
+# Per-target forbidden / required token tables (Phase 10)
+# ---------------------------------------------------------------------------
+
+# Tokens that must NOT appear in any generated .py (keyed by target framework).
+# Each target bans the other three frameworks' source constructs.
+_FORBIDDEN_CODE_TOKENS: dict[str, tuple[str, ...]] = {
+    "maf": (
+        "from langgraph",
+        "import langgraph",
+        "StateGraph(",
+        "add_conditional_edges(",
+        "from crewai",
+        "import crewai",
+        "from strands",
+        "import strands",
+        "semantic_kernel",
+        "kernel_function",
+    ),
+    "langgraph": (
+        "from agent_framework",
+        "import agent_framework",
+        "WorkflowBuilder(",
+        "@executor",
+        "@handler",
+        "from crewai",
+        "import crewai",
+        "from strands",
+        "import strands",
+        "semantic_kernel",
+    ),
+    "crewai": (
+        "from agent_framework",
+        "import agent_framework",
+        "WorkflowBuilder(",
+        "StateGraph(",
+        "from langgraph",
+        "import langgraph",
+        "from strands",
+        "import strands",
+        "semantic_kernel",
+    ),
+    "aws_strands": (
+        "from agent_framework",
+        "import agent_framework",
+        "WorkflowBuilder(",
+        "StateGraph(",
+        "from langgraph",
+        "import langgraph",
+        "from crewai",
+        "import crewai",
+        "semantic_kernel",
+    ),
+}
+
+# Default (unknown / dynamic target) — forbid all known source constructs.
+_FORBIDDEN_CODE_TOKENS_DEFAULT: tuple[str, ...] = (
     "semantic_kernel",
     "kernel_function",
     "from langgraph",
     "import langgraph",
-    "StateGraph",
-    "add_conditional_edges",
+    "StateGraph(",
+    "add_conditional_edges(",
     "TypedDict",
     "from operator import add",
 )
-# Tokens that must NOT survive into requirements.txt.
-_FORBIDDEN_REQ_TOKENS = ("langgraph", "langchain", "semantic-kernel", "zipfile")
 
-_SENTINELS = frozenset({"START", "END", "__start__", "__end__"})
+# Tokens that MUST appear in orchestrator.py to prove the target shape landed.
+# Only checked when the IR has a non-trivial workflow (more than zero real nodes).
+_REQUIRED_ORCHESTRATOR_TOKENS: dict[str, tuple[str, ...]] = {
+    "maf": ("WorkflowBuilder", "build_workflow"),
+    "langgraph": ("StateGraph", "add_node", "set_entry_point", "build_graph"),
+    "crewai": ("Crew", "Task", "Process"),
+    "aws_strands": ("Agent", "build_agent"),
+}
 
+# Tokens that must NOT appear in requirements.txt (all targets share this list).
+_FORBIDDEN_REQ_TOKENS: tuple[str, ...] = (
+    "langgraph",
+    "langchain",
+    "semantic-kernel",
+    "zipfile",
+)
+
+# Per-target runnable check code snippets (executed as subprocesses).
+_RUNNABLE_CHECKS: dict[str, list[tuple[str, str]]] = {
+    "maf": [
+        (
+            "stub_imports",
+            "from agent_framework import (WorkflowBuilder, WorkflowContext, executor, "
+            "RequestInfoExecutor, RequestInfoMessage, RequestInfoEvent, WorkflowOutputEvent, "
+            "FileCheckpointStorage, ChatAgent, ai_function); print('stub ok')",
+        ),
+        (
+            "graph_builds",
+            "from orchestrator import build_workflow; wf = build_workflow(); print('graph ok')",
+        ),
+    ],
+    "langgraph": [
+        (
+            "graph_builds",
+            "from orchestrator import build_graph; g = build_graph(); print('graph ok')",
+        ),
+    ],
+    "crewai": [
+        (
+            "crew_builds",
+            "from orchestrator import build_crew; c = build_crew(); print('crew ok')",
+        ),
+    ],
+    "aws_strands": [
+        (
+            "agent_builds",
+            "from orchestrator import build_agent; a = build_agent(); print('agent ok')",
+        ),
+    ],
+}
+
+
+# ---------------------------------------------------------------------------
+# Report dataclass
+# ---------------------------------------------------------------------------
 
 @dataclass
 class AcceptanceReport:
@@ -52,6 +171,10 @@ class AcceptanceReport:
         return [f"{name}: {detail}" for name, ok, detail in self.checks if not ok]
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _read(root: str, rel: str) -> str:
     try:
         with open(os.path.join(root, rel), encoding="utf-8") as fh:
@@ -60,11 +183,29 @@ def _read(root: str, rel: str) -> str:
         return ""
 
 
+def _target_forbidden_tokens(target: Optional[str]) -> tuple[str, ...]:
+    if target and target in _FORBIDDEN_CODE_TOKENS:
+        return _FORBIDDEN_CODE_TOKENS[target]
+    return _FORBIDDEN_CODE_TOKENS_DEFAULT
+
+
+def _target_required_tokens(target: Optional[str]) -> tuple[str, ...]:
+    if target and target in _REQUIRED_ORCHESTRATOR_TOKENS:
+        return _REQUIRED_ORCHESTRATOR_TOKENS[target]
+    # Default: MAF (original behaviour)
+    return _REQUIRED_ORCHESTRATOR_TOKENS["maf"]
+
+
+# ---------------------------------------------------------------------------
+# Main verification
+# ---------------------------------------------------------------------------
+
 def verify_output(ir: IR, generation) -> AcceptanceReport:
     """Diff the generated package against the IR and check for residue."""
     report = AcceptanceReport()
     root = generation.output_root
     py_files = [r for r in generation.written_files if r.endswith(".py")]
+    target = ir.metadata.target_framework or "maf"
 
     # 1. Every generated .py compiles.
     non_compiling = list(generation.syntax_errors)
@@ -81,21 +222,21 @@ def verify_output(ir: IR, generation) -> AcceptanceReport:
         f"files failing to parse: {sorted(set(non_compiling))}" if non_compiling else "",
     )
 
-    # 2. No source-framework residue in code. The vendored agent_framework/ stub
-    #    is infrastructure (it legitimately names SDK constructs), not converted
-    #    code, so it is excluded from the residue scan.
+    # 2. No source-framework residue in code.
+    # The vendored agent_framework/ stub is infrastructure and excluded.
+    forbidden_tokens = _target_forbidden_tokens(target)
     code_hits: list[str] = []
     for rel in py_files:
         if rel.replace("\\", "/").startswith("agent_framework/"):
             continue
         text = _read(root, rel)
-        for token in _FORBIDDEN_CODE_TOKENS:
+        for token in forbidden_tokens:
             if token in text:
-                code_hits.append(f"{rel}:{token}")
+                code_hits.append(f"{rel}:{token!r}")
     report.add(
         "no_source_framework_residue",
         not code_hits,
-        f"forbidden tokens: {code_hits}" if code_hits else "",
+        f"forbidden tokens found: {code_hits}" if code_hits else "",
     )
 
     # 3. requirements.txt is clean.
@@ -107,7 +248,7 @@ def verify_output(ir: IR, generation) -> AcceptanceReport:
         f"forbidden requirements: {req_hits}" if req_hits else "",
     )
 
-    # 4. IR coverage -- every node/tool/HITL point has an artifact.
+    # 4. IR coverage -- every node / tool / HITL point has an artifact.
     orch = _read(root, "orchestrator.py")
     plugins = "\n".join(
         _read(root, r) for r in py_files if r.replace("\\", "/").startswith("plugins/")
@@ -146,41 +287,45 @@ def verify_output(ir: IR, generation) -> AcceptanceReport:
         f"HITL points with no artifact: {missing_hitl}" if missing_hitl else "",
     )
 
-    # 5. When the IR has a graph, the workflow was actually assembled.
-    if wf and any(n.role is not NodeRole.AUX for n in wf.nodes):
-        assembled = "WorkflowBuilder" in orch and "set_start_executor" in orch
+    # 5. Per-target required symbols prove the target shape landed.
+    real_nodes = [n for n in (wf.nodes if wf else []) if n.name not in _SENTINELS and n.role is not NodeRole.AUX]
+    if real_nodes:
+        required = _target_required_tokens(target)
+        missing_required = [tok for tok in required if tok not in orch]
         report.add(
-            "workflow_assembled",
-            assembled,
-            "" if assembled else "orchestrator.py has no WorkflowBuilder/set_start_executor",
+            "target_shape_present",
+            not missing_required,
+            f"required tokens absent from orchestrator.py: {missing_required}" if missing_required else "",
+        )
+
+    # 6. Loop reachability: every LoopGuard's loop_node has a function.
+    if wf and wf.loop_guards:
+        missing_loop_fns = [
+            g.loop_node for g in wf.loop_guards
+            if f"def {g.loop_node}(" not in orch
+        ]
+        report.add(
+            "loop_nodes_reachable",
+            not missing_loop_fns,
+            f"loop nodes with no function: {missing_loop_fns}" if missing_loop_fns else "",
         )
 
     return report
 
 
-_RUNNABLE_CHECKS = (
-    (
-        "stub_imports",
-        "from agent_framework import (WorkflowBuilder, WorkflowContext, executor, "
-        "RequestInfoExecutor, RequestInfoMessage, RequestInfoEvent, WorkflowOutputEvent, "
-        "FileCheckpointStorage, ChatAgent, ai_function); print('stub ok')",
-    ),
-    (
-        "graph_builds",
-        "from orchestrator import build_workflow; wf = build_workflow(); print('graph ok')",
-    ),
-)
+# ---------------------------------------------------------------------------
+# Subprocess runnable checks (opt-in)
+# ---------------------------------------------------------------------------
 
+def verify_runnable(output_root: str, target: str = "maf", timeout: int = 90) -> list[tuple[str, bool, str]]:
+    """Run per-target acceptance subprocess checks in the OUTPUT dir.
 
-def verify_runnable(output_root: str, timeout: int = 90) -> list[tuple[str, bool, str]]:
-    """Run the two acceptance subprocess checks in the OUTPUT dir.
-
-    (1) import the generated agent_framework stub; (2) import orchestrator and
-    build the workflow. Returns (name, ok, detail); on failure `detail` carries
-    the exact stderr/stdout so the error is surfaced, never swallowed.
+    Returns (name, ok, detail); on failure `detail` carries the exact
+    stderr/stdout so the error is surfaced, never swallowed.
     """
+    checks = _RUNNABLE_CHECKS.get(target, _RUNNABLE_CHECKS["maf"])
     results: list[tuple[str, bool, str]] = []
-    for name, code in _RUNNABLE_CHECKS:
+    for name, code in checks:
         try:
             proc = subprocess.run(
                 [sys.executable, "-c", code],
@@ -196,6 +341,10 @@ def verify_runnable(output_root: str, timeout: int = 90) -> list[tuple[str, bool
         results.append((name, ok, detail))
     return results
 
+
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
 
 def render_acceptance(report: AcceptanceReport) -> str:
     """Render the acceptance report as Markdown for ACCEPTANCE.md."""

@@ -144,16 +144,57 @@ def _indent(src: str, spaces: int) -> str:
     return textwrap.indent(src, " " * spaces)
 
 
+def _default_return_for(returns: Optional[str]) -> str:
+    """A type-appropriate default return expression for a bodiless tool.
+
+    Keeps the tool CALLABLE (a complete, runnable scaffold) instead of raising,
+    so the converted agent can be exercised end-to-end while the human fills in
+    the real logic. The annotation is matched leniently (Optional[...], list[...]
+    etc. all resolve to their base container).
+    """
+    if not returns:
+        return "None"
+    r = returns.strip().lower()
+    if r.startswith(("list", "sequence", "tuple", "iterable")):
+        return "[]"
+    if r.startswith(("dict", "mapping")):
+        return "{}"
+    if r.startswith("set"):
+        return "set()"
+    if r.startswith("str"):
+        return '""'
+    if r.startswith("bool"):
+        return "False"
+    if r.startswith(("int", "float")):
+        return "0"
+    if r.startswith("none"):
+        return "None"
+    return "None"
+
+
 def plugin_method_body(tool: ToolSpec, indent: int = 8) -> str:
-    """Body for a plugin method: real tool logic if available, else a stub."""
+    """Body for a plugin method: real tool logic if available, else a runnable scaffold.
+
+    A bodiless tool (documented in the README but with no captured source, or a
+    tool whose body could not be recovered) is emitted as a COMPLETE, runnable
+    scaffold that returns a type-appropriate default and logs a warning -- not a
+    `raise NotImplementedError` that breaks the package the moment the tool runs.
+    The `# TODO` marker still flags it for a human to complete.
+    """
     lines: list[str] = []
     if tool.docstring:
         lines.append(f'"""{tool.docstring}"""')
     if tool.body:
         lines.append(tool.body)
     else:
-        lines.append(f"# TODO: port logic from source tool '{tool.name}'")
-        lines.append("raise NotImplementedError")
+        default = _default_return_for(tool.returns)
+        lines.append(f"# TODO: port logic from source tool '{tool.name}' (scaffold below is runnable).")
+        lines.append("import logging")
+        lines.append(
+            f"logging.getLogger(__name__).warning("
+            f"\"tool '{tool.name}' is a generated scaffold; implement its real logic\")"
+        )
+        lines.append(f"return {default}")
     return _indent("\n".join(lines), indent)
 
 

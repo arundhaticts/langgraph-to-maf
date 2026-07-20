@@ -22,6 +22,7 @@ Anything absent falls back to a sensible default, so a minimal pack still works.
 from __future__ import annotations
 
 from converter.adapters.base import TargetAdapter, to_pascal_case
+from converter.contracts import ConstructSupport, ConstructType
 
 
 class DynamicTargetAdapter(TargetAdapter):
@@ -49,6 +50,7 @@ class DynamicTargetAdapter(TargetAdapter):
 
         self._runtime_requirements = self._resolve_requirements()
         self._reject_tokens = self._resolve_reject_tokens()
+        self._capability_matrix = self._resolve_capability_matrix()
 
     # -- schema resolution -------------------------------------------------
 
@@ -70,6 +72,36 @@ class DynamicTargetAdapter(TargetAdapter):
         if isinstance(items, (list, tuple)):
             return tuple(str(x) for x in items if x)
         return ()
+
+    def _resolve_capability_matrix(self) -> dict[ConstructType, ConstructSupport]:
+        """Build the capability matrix from the pack, exactly like a hand-written
+        adapter (e.g. MAF) declares one.
+
+        The pack declares support under a `capabilities` object in vocabulary.json,
+        keyed by ConstructType value with a ConstructSupport value, e.g.::
+
+            "capabilities": {
+                "tools": "direct",
+                "hitl": "lossy",
+                "checkpointing": "unsupported"
+            }
+
+        Any construct the pack does not mention defaults to DIRECT (optimistic),
+        so a minimal pack still works while a thorough pack drives real Phase-5b
+        capability negotiation (LOSSY -> needs_review, UNSUPPORTED -> manual).
+        """
+        declared = self._vocab.get("capabilities", {}) or {}
+        matrix: dict[ConstructType, ConstructSupport] = {}
+        for construct in ConstructType:
+            raw = declared.get(construct.value)
+            support = ConstructSupport.DIRECT
+            if isinstance(raw, str):
+                try:
+                    support = ConstructSupport(raw.strip().lower())
+                except ValueError:
+                    support = ConstructSupport.DIRECT
+            matrix[construct] = support
+        return matrix
 
     # -- TargetAdapter interface ------------------------------------------
 
@@ -94,6 +126,9 @@ class DynamicTargetAdapter(TargetAdapter):
 
     def runtime_requirements(self) -> tuple[str, ...]:
         return self._runtime_requirements
+
+    def capability_matrix(self) -> dict[ConstructType, ConstructSupport]:
+        return self._capability_matrix
 
     # -- extras used by the generator's validation (optional) -------------
 

@@ -23,35 +23,46 @@ const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()))
 // For a separately-deployed backend, set VITE_API_BASE at build time.
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 
-// Files kept from an uploaded framework pack (docs, vocab, examples).
-const PACK_EXT = /\.(md|markdown|txt|json|ya?ml|py)$/i
-
 export default function App() {
   const inputRef = useRef(null)
-  const packRef = useRef(null)
   const [method, setMethod] = useState('path') // 'path' (recommended) | 'upload'
   const [path, setPath] = useState('')
   const [files, setFiles] = useState([])
   const [skipped, setSkipped] = useState(0)
   const [mode, setMode] = useState('llm')
-  const [pack, setPack] = useState([])       // [{path, content}] target framework pack
-  const [target, setTarget] = useState('')   // framework name (from pack top folder)
+  const [frameworks, setFrameworks] = useState([]) // [{name, display_name, source, target}]
+  const [source, setSource] = useState('')   // source framework name
+  const [target, setTarget] = useState('')   // target framework name
   const [reading, setReading] = useState(false)
   const [converting, setConverting] = useState(false)
   const [status, setStatus] = useState(null) // {kind:'ok'|'err', text}
 
-  // A valid pack must contain a vocabulary.json.
-  const packHasVocab = pack.some((f) => /(^|\/)vocabulary\.json$/i.test(f.path.replace(/\\/g, '/')))
+  const sourceOptions = frameworks.filter((f) => f.source)
+  const targetOptions = frameworks.filter((f) => f.target && f.name !== source)
+
+  // Load the framework catalogue for the dropdowns, and pick sensible defaults.
+  useEffect(() => {
+    fetch(`${API_BASE}/api/frameworks`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(r)))
+      .then((data) => {
+        const fw = data.frameworks || []
+        setFrameworks(fw)
+        const firstSource = fw.find((f) => f.source)
+        const firstTarget = fw.find((f) => f.target)
+        if (firstSource) setSource(firstSource.name)
+        if (firstTarget) setTarget(firstTarget.name)
+      })
+      .catch(() => setStatus({
+        kind: 'err',
+        text: 'Cannot reach the backend to load frameworks. Start it with: python -m uvicorn api:app --app-dir backend --port 8000',
+      }))
+  }, [])
 
   // webkitdirectory / directory are non-standard; set them imperatively.
   useEffect(() => {
     if (inputRef.current) {
       inputRef.current.setAttribute('webkitdirectory', '')
       inputRef.current.setAttribute('directory', '')
-    }
-    if (packRef.current) {
-      packRef.current.setAttribute('webkitdirectory', '')
-      packRef.current.setAttribute('directory', '')
     }
   }, [method])
 
@@ -76,27 +87,11 @@ export default function App() {
     setReading(false)
   }
 
-  async function onPickPack(e) {
-    const list = Array.from(e.target.files || [])
-    const collected = []
-    let top = ''
-    for (const f of list) {
-      const rel = (f.webkitRelativePath || f.name).replace(/\\/g, '/')
-      const parts = rel.split('/')
-      if (parts.length > 1) top = parts[0]
-      if (!PACK_EXT.test(f.name)) continue
-      try { collected.push({ path: rel, content: await f.text() }) } catch {}
-    }
-    setPack(collected)
-    setTarget(top)
-    setStatus(null)
-  }
-
   function download(blob) {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = 'converted_maf_agent.zip'
+    a.download = 'converted_agent.zip'
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -107,8 +102,8 @@ export default function App() {
     try {
       const endpoint = method === 'path' ? '/api/convert-path' : '/api/convert'
       const body = method === 'path'
-        ? { mode, path, target, framework_files: pack }
-        : { mode, files, target, framework_files: pack }
+        ? { mode, path, source, target }
+        : { mode, files, source, target }
       const res = await fetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -119,7 +114,7 @@ export default function App() {
         throw new Error(err.detail || 'Conversion failed')
       }
       download(await res.blob())
-      setStatus({ kind: 'ok', text: 'Done — converted_maf_agent.zip downloaded. See INSTALL.md & MIGRATION_REPORT.md inside.' })
+      setStatus({ kind: 'ok', text: 'Done — converted_agent.zip downloaded. See INSTALL.md & MIGRATION_REPORT.md inside.' })
     } catch (e) {
       // A TypeError from fetch means the request never reached the backend.
       const networkError = e instanceof TypeError || /failed to fetch/i.test(e.message)
@@ -135,14 +130,14 @@ export default function App() {
   }
 
   const hasSource = method === 'path' ? path.trim().length > 0 : files.length > 0
-  const canConvert = hasSource && packHasVocab
+  const canConvert = hasSource && !!target
 
   return (
     <div className="wrap">
       <h1>Framework Conversion Utility</h1>
       <p className="sub">
-        Convert a <b>LangGraph</b> agent to <b>any target framework</b>. Point at the agent folder,
-        upload the target framework's pack folder, choose how the hard parts are handled, and download the converted agent.
+        Convert an agent from <b>any source framework</b> to <b>any target framework</b>. Point at the agent folder,
+        pick the source and target frameworks, choose how the hard parts are handled, and download the converted agent.
       </p>
 
       <div className="card">
@@ -185,23 +180,39 @@ export default function App() {
       </div>
 
       <div className="card">
-        <h2>Target framework pack <span style={{ fontWeight: 400, fontSize: 13, color: '#c0392b' }}>(required)</span></h2>
+        <h2>Source &amp; target frameworks</h2>
         <p className="sub" style={{ marginTop: 0 }}>
-          Upload the target framework's <b>folder</b> (e.g. <code>maf/</code>). It must contain a <code>vocabulary.json</code>
-          (the term map that drives conversion); <code>docs.md</code> and <code>examples/*.py</code> ground the LLM.
-          The folder name becomes the target framework — this is how the tool targets any framework with no code change.
+          Pick what you're converting <b>from</b> and <b>to</b>. Frameworks are loaded from the
+          backend's <code>frameworks/</code> folder — drop in a new one there and it appears here automatically.
         </p>
-        <label className="file">
-          Click to choose the framework folder
-          <input ref={packRef} type="file" multiple onChange={onPickPack} />
-          <div className="picked">
-            {pack.length
-              ? (packHasVocab
-                  ? <span>Target <b>{target || 'custom'}</b> — {pack.length} pack file{pack.length > 1 ? 's' : ''} loaded ✓</span>
-                  : <span style={{ color: '#c0392b' }}>{pack.length} files loaded, but no <code>vocabulary.json</code> found — pick the folder that contains it.</span>)
-              : <span>No framework folder selected</span>}
+        <div className="opts">
+          <div className="opt" style={{ cursor: 'default' }}>
+            <h3>Source framework</h3>
+            <select
+              className="path"
+              value={source}
+              onChange={(e) => { setSource(e.target.value); setStatus(null) }}
+            >
+              {sourceOptions.length === 0 && <option value="">(loading…)</option>}
+              {sourceOptions.map((f) => (
+                <option key={f.name} value={f.name}>{f.display_name}</option>
+              ))}
+            </select>
           </div>
-        </label>
+          <div className="opt" style={{ cursor: 'default' }}>
+            <h3>Target framework</h3>
+            <select
+              className="path"
+              value={target}
+              onChange={(e) => { setTarget(e.target.value); setStatus(null) }}
+            >
+              {targetOptions.length === 0 && <option value="">(loading…)</option>}
+              {targetOptions.map((f) => (
+                <option key={f.name} value={f.name}>{f.display_name}</option>
+              ))}
+            </select>
+          </div>
+        </div>
       </div>
 
       <div className="card">

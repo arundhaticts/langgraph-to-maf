@@ -9,6 +9,7 @@ come from the Tier-3 knowledge pack in `frameworks/maf/`.
 from __future__ import annotations
 
 from converter.adapters.base import TargetAdapter, to_pascal_case
+from converter.contracts import ConstructSupport, ConstructType
 
 
 class MAFTargetAdapter(TargetAdapter):
@@ -41,3 +42,17 @@ class MAFTargetAdapter(TargetAdapter):
 
     def runtime_requirements(self) -> tuple[str, ...]:
         return ("agent-framework",)
+
+    def capability_matrix(self) -> dict[ConstructType, ConstructSupport]:
+        D, L = ConstructSupport.DIRECT, ConstructSupport.LOSSY
+        return {
+            ConstructType.TOOLS:              D,  # @ai_function typed functions
+            ConstructType.STATE_TYPED:        D,  # pydantic WorkflowContext / TypedDict
+            ConstructType.STATE_SHARED:       D,  # shared across all executors
+            ConstructType.CONDITIONAL_EDGES:  D,  # guarded edges with router outcomes
+            ConstructType.LOOPS:              D,  # back-edges with loop-guard condition
+            ConstructType.HITL:               D,  # RequestInfoExecutor + auto-approve fast-path
+            ConstructType.CHECKPOINTING:      D,  # FileCheckpointStorage / SqliteCheckpointStorage
+            ConstructType.MULTI_AGENT:        L,  # ChatAgent supports one agent; Swarm is manual
+            ConstructType.AGENT_ROLES:        L,  # no formal role/goal/backstory primitive
+        }

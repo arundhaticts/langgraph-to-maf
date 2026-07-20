@@ -83,8 +83,18 @@ def test_plugin_method_body_uses_real_logic():
     assert "NotImplementedError" not in body
 
 
-def test_plugin_method_body_stub_when_no_body():
+def test_plugin_method_body_runnable_scaffold_when_no_body():
+    """A bodiless tool becomes a COMPLETE runnable scaffold, not a crash."""
     tool = ToolSpec(name="mystery")
     body = plugin_method_body(tool, indent=8)
-    assert "NotImplementedError" in body
+    # No NotImplementedError -- the tool must be callable end-to-end.
+    assert "NotImplementedError" not in body
     assert "TODO: port logic from source tool 'mystery'" in body
+    assert "return None" in body
+
+
+def test_plugin_method_body_scaffold_returns_typed_default():
+    tool = ToolSpec(name="list_items", returns="list[str]")
+    body = plugin_method_body(tool, indent=8)
+    assert "return []" in body
+    assert "NotImplementedError" not in body

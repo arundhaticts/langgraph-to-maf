@@ -26,6 +26,88 @@ from converter.engine.tier3_llm import _call_gemini
 # Fact collection (deterministic -- the grounding for both paths)
 # ---------------------------------------------------------------------------
 
+# Deterministic-stub markers the generator can leave behind when a construct
+# could not be fully converted automatically. Each maps to (short label, the
+# action a human -- assisted by Claude Code -- should take, realistic time).
+# These are surfaced as remaining-work rows AND fed to the LLM refinement loop,
+# which drafts a basic working version so the shipped folder is runnable, not empty.
+_STUB_MARKERS: list[tuple[str, str, str, str]] = [
+    (
+        "raise NotImplementedError",
+        "Orchestration/logic left unresolved (raises NotImplementedError)",
+        "Implement the real flow using the target framework's idioms",
+        "2 hrs",
+    ),
+    (
+        "# TODO: port logic from source tool",
+        "Tool body could not be recovered; a runnable scaffold was emitted",
+        "Port the tool's real logic into the scaffold",
+        "1 hr",
+    ),
+    (
+        "# TODO: port logic from source node",
+        "Node logic could not be ported automatically",
+        "Port the node's real logic",
+        "1 hr",
+    ),
+    (
+        "# TODO: automatic port failed for node",
+        "Node port failed; a safe pass-through stub was emitted",
+        "Port the node's real logic by hand",
+        "1 hr",
+    ),
+    (
+        "# TODO: confirm the real loop cap",
+        "Loop iteration cap is a safe default (10), not the source value",
+        "Confirm the real loop bound and set it",
+        "15 min",
+    ),
+    (
+        "# TODO: break on the real exit condition",
+        "Loop exit condition is a placeholder (guard-count only)",
+        "Wire the real exit condition",
+        "30 min",
+    ),
+    (
+        "chat_client=None",
+        "Agent LLM chat client is a placeholder (chat_client=None)",
+        "Pass your chat client / LLM provider to the agent",
+        "30 min",
+    ),
+]
+
+
+def _scan_code_stubs(generation) -> list[dict]:
+    """Scan the generated .py files for deterministic-stub markers.
+
+    Returns a list of {label, action, time, files} — one entry per marker kind
+    that actually appears in the output. Never raises (best-effort).
+    """
+    import os as _os
+
+    found: list[dict] = []
+    try:
+        root = getattr(generation, "output_root", None)
+        rels = [r for r in getattr(generation, "written_files", []) or [] if r.endswith(".py")]
+        if not root or not rels:
+            return found
+        # Read each file once, test every marker against it.
+        contents: dict[str, str] = {}
+        for rel in rels:
+            try:
+                with open(_os.path.join(root, rel.replace("/", _os.sep)), encoding="utf-8") as fh:
+                    contents[rel] = fh.read()
+            except OSError:
+                continue
+        for marker, label, action, time in _STUB_MARKERS:
+            hits = sorted(rel for rel, text in contents.items() if marker in text)
+            if hits:
+                found.append({"label": label, "action": action, "time": time, "files": hits})
+    except Exception:  # noqa: BLE001 - the readiness report must never crash the pipeline
+        pass
+    return found
+
+
 def collect_facts(
     ir: IR,
     conversion: ConversionResult,
@@ -85,6 +167,7 @@ def collect_facts(
         "acceptance_checks": acc_checks,
         "manual_actions": manual,
         "needs_review": needs_review,
+        "code_stubs": _scan_code_stubs(generation),
     }
 
 
@@ -151,6 +234,18 @@ def _fallback_report(facts: dict) -> str:
     for err in facts["syntax_errors"]:
         rows.append((f"Syntax error in {err}", "Human via Claude Code", "Fix generated code", "30 min"))
 
+    # Deterministic-stub markers left in the generated code. The LLM refinement
+    # pass drafts a basic working version of each; a human (via Claude Code)
+    # reviews and finalises it -- so these ship as reviewable code, not blanks.
+    for stub in facts.get("code_stubs", []):
+        where = ", ".join(stub.get("files", [])) or "generated code"
+        rows.append((
+            f"{stub['label']} (in {where})",
+            "Human via Claude Code",
+            stub["action"],
+            stub["time"],
+        ))
+
     for hitl in facts["hitl_nodes"]:
         rows.append((
             f"HITL node '{hitl}' defaults to auto-approve (HITL_MODE=auto)",
@@ -198,8 +293,40 @@ def _fallback_report(facts: dict) -> str:
     if not rows:
         rows.append(("No outstanding items detected", "-", "Ship it", "-"))
 
+    def _clamp_time(t: str) -> str:
+        """Cap any estimate that exceeds 2 hours."""
+        if not t or t == "-":
+            return t
+        import re
+        nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", t)]
+        if not nums:
+            return t
+        if max(nums) > 2 and ("hr" in t.lower() or "hour" in t.lower()):
+            return "2 hrs"
+        return t
+
+    capped = [(i, o, a, _clamp_time(t)) for (i, o, a, t) in rows]
+
+    def _to_minutes(t: str) -> float:
+        if not t or t == "-":
+            return 0.0
+        import re
+        nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", t)]
+        if not nums:
+            return 0.0
+        val = sum(nums) / len(nums)
+        if "hr" in t.lower() or "hour" in t.lower():
+            return val * 60
+        return val
+
+    total_min = sum(_to_minutes(t) for (_, _, _, t) in capped)
+    if total_min > 0:
+        hrs, mins = divmod(int(total_min), 60)
+        total_str = f"{hrs} hr{'s' if hrs != 1 else ''} {mins} min" if hrs else f"{mins} min"
+        capped.append(("**Total**", "", "", f"**{total_str}**"))
+
     work_table = "| Item | Owner | Action | Time |\n|---|---|---|---|\n" + "\n".join(
-        f"| {i} | {o} | {a} | {t} |" for (i, o, a, t) in rows
+        f"| {i} | {o} | {a} | {t} |" for (i, o, a, t) in capped
     )
 
     # Accuracy dimensions from the actual nodes/roles.

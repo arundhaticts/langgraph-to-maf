@@ -97,6 +97,36 @@ class Tier(str, Enum):
     UNRESOLVED = "unresolved"  # flagged for manual conversion
 
 
+class ConstructType(str, Enum):
+    """IR constructs that a target framework may or may not support natively.
+
+    Used by Phase 5b capability negotiation to classify each IR construct as
+    DIRECT / LOSSY / UNSUPPORTED before code generation begins.
+    """
+    TOOLS = "tools"                        # @tool-decorated functions
+    STATE_TYPED = "state_typed"            # TypedDict-style typed shared state
+    STATE_SHARED = "state_shared"          # mutable state visible to all nodes
+    CONDITIONAL_EDGES = "conditional_edges"  # explicit deterministic branching
+    LOOPS = "loops"                        # back-edges / cycles with exit guard
+    HITL = "hitl"                          # pause-for-human primitives
+    CHECKPOINTING = "checkpointing"        # persist + resume across restarts
+    MULTI_AGENT = "multi_agent"            # multiple agent roles / tasks
+    AGENT_ROLES = "agent_roles"            # role / goal / backstory per agent
+
+
+class ConstructSupport(str, Enum):
+    """Fidelity with which a target framework can handle a given IR construct.
+
+    DIRECT       — native idiom, high-fidelity one-to-one mapping.
+    LOSSY        — emulated; some semantics are approximated or lost.
+    UNSUPPORTED  — no native home; a documented stub is emitted and the
+                   item appears as manual_action_required in the report.
+    """
+    DIRECT = "direct"
+    LOSSY = "lossy"
+    UNSUPPORTED = "unsupported"
+
+
 # ---------------------------------------------------------------------------
 # Scanner contract (Module 1)
 # ---------------------------------------------------------------------------
@@ -289,6 +319,54 @@ class HitlPoint:
 
 
 @dataclass
+class AgentSpec:
+    """An agent with a role identity — the CrewAI / Strands source model.
+
+    Populated by source adapters that model agents explicitly (CrewAI's
+    `Agent(role=..., goal=..., backstory=...)`, Strands' `Agent(system_prompt=...)`).
+    Graph-based sources (LangGraph, MAF) leave this list empty.
+    """
+    name: str                                    # variable name in source
+    role: Optional[str] = None                  # CrewAI role string
+    goal: Optional[str] = None                  # CrewAI goal string
+    backstory: Optional[str] = None             # CrewAI backstory string
+    system_prompt: Optional[str] = None         # Strands / generic system prompt
+    allowed_tools: list[str] = field(default_factory=list)  # tool names
+    model: Optional[str] = None                 # LLM model name / constructor
+    llm: Optional[str] = None                   # llm kwarg variable name
+
+
+@dataclass
+class TaskSpec:
+    """A task assigned to an agent — the CrewAI source model.
+
+    Populated by the CrewAI source adapter when parsing
+    `Task(description=..., expected_output=..., agent=..., context=[...])`.
+    Other sources leave this list empty.
+    """
+    name: str                                    # variable name in source
+    description: Optional[str] = None
+    expected_output: Optional[str] = None
+    assigned_agent: Optional[str] = None        # agent variable name
+    depends_on: list[str] = field(default_factory=list)  # task var names
+
+
+@dataclass
+class CapabilityNegotiation:
+    """Result of checking one IR construct against the target framework (Phase 5b).
+
+    Produced by `engine/capability_negotiation.negotiate()`. Every non-DIRECT
+    result surfaces in the migration report (LOSSY → needs_review,
+    UNSUPPORTED → manual_action_required).
+    """
+    construct: ConstructType
+    support: ConstructSupport
+    detail: str                             # what the IR has + what target can/can't do
+    emulation_note: Optional[str] = None   # how it is emulated if LOSSY
+    manual_action: Optional[str] = None    # what the human must do if UNSUPPORTED
+
+
+@dataclass
 class GraphSpec:
     nodes: list[GraphNode] = field(default_factory=list)
     edges: list[GraphEdge] = field(default_factory=list)
@@ -328,6 +406,9 @@ class ComponentInventory:
     checkpointer: Optional[str] = None
     # Cross-reference warnings (AST is authoritative over README).
     warnings: list[str] = field(default_factory=list)
+    # Agent / task specs from role-based source frameworks (CrewAI, Strands).
+    agent_specs: list[AgentSpec] = field(default_factory=list)
+    task_specs: list[TaskSpec] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +464,9 @@ class IR:
     state_class_names: list[str] = field(default_factory=list)
     # Files carried from the manifest with their assigned action.
     files: list[FileEntry] = field(default_factory=list)
+    # Agent / task specs from role-based source frameworks (CrewAI, Strands).
+    agent_specs: list[AgentSpec] = field(default_factory=list)
+    task_specs: list[TaskSpec] = field(default_factory=list)
 
     def to_json_dict(self) -> dict[str, Any]:
         """Serialise for the ir.json debug checkpoint (Module 5)."""
@@ -444,3 +528,67 @@ class MigrationReport:
     auto_converted: list[ReportEntry] = field(default_factory=list)
     needs_review: list[ReportEntry] = field(default_factory=list)
     manual_action_required: list[ReportEntry] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Source-framework vocabulary (Section 16 -- "any framework -> any framework")
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SourceVocabulary:
+    """The framework-specific call/name tables the code parser reads.
+
+    This is the ONLY source-framework knowledge the AST parser needs. Each
+    `SourceAdapter.vocabulary()` returns one of these; the parser is otherwise
+    fully framework-agnostic. The field defaults are the LangGraph values, so a
+    zero-arg `SourceVocabulary()` reproduces the original hardcoded behaviour and
+    a new source framework overrides only the fields that differ.
+    """
+
+    # Decorator names that mark a tool function (`@tool`).
+    tool_decorators: frozenset[str] = frozenset({"tool"})
+
+    # Graph-builder method names the parser recognises on the builder object.
+    graph_methods: frozenset[str] = frozenset(
+        {"add_node", "add_edge", "add_conditional_edges", "set_entry_point", "set_finish_point"}
+    )
+
+    # Exact LLM constructor call names.
+    llm_constructors: frozenset[str] = frozenset(
+        {"init_chat_model", "OpenAI", "AzureOpenAI", "Anthropic", "AnthropicLLM"}
+    )
+    # Call-name prefixes also treated as LLM constructors (e.g. "Chat" -> ChatOpenAI).
+    llm_constructor_prefixes: tuple[str, ...] = ("Chat",)
+
+    # Persistence / checkpointer constructor names.
+    checkpointer_constructors: frozenset[str] = frozenset(
+        {"MemorySaver", "SqliteSaver", "AsyncSqliteSaver", "PostgresSaver", "AsyncPostgresSaver"}
+    )
+
+    # Sentinel node names, normalised for the IR (e.g. START/END markers).
+    sentinels: dict[str, str] = field(
+        default_factory=lambda: {
+            "START": "START",
+            "__start__": "START",
+            "END": "END",
+            "__end__": "END",
+        }
+    )
+
+    # Base class name(s) that identify a state schema (`TypedDict`).
+    state_base_classes: frozenset[str] = frozenset({"TypedDict"})
+
+    # Import roots dropped from the output (source-framework wiring, not logic).
+    dropped_import_roots: frozenset[str] = frozenset({"langgraph"})
+
+    # Tokens that mark a statement as graph wiring rather than portable setup.
+    graph_tokens: tuple[str, ...] = (
+        "StateGraph",
+        "MessageGraph",
+        ".add_node",
+        ".add_edge",
+        ".add_conditional_edges",
+        ".set_entry_point",
+        ".set_finish_point",
+        ".compile(",
+    )

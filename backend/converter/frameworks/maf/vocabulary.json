@@ -8,6 +8,10 @@
     "source_framework": "langgraph"
   },
 
+  "display_name": "MAF",
+  "supports_source": true,
+  "supports_target": true,
+
   "primitives": {
     "StateGraph": {
       "maf_equivalent": "Workflow",

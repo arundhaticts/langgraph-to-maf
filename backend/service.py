@@ -19,7 +19,11 @@ import zipfile
 # (this file lives next to the `converter/` package inside backend/).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from converter.adapters import frameworks_base, list_frameworks  # noqa: E402
+from converter.adapters import (  # noqa: E402
+    frameworks_base,
+    list_frameworks,
+    list_source_frameworks,
+)
 from converter.config import Config, ConversionMode  # noqa: E402
 from converter.pipeline.hybrid_pipeline import HybridPipeline  # noqa: E402
 
@@ -99,18 +103,27 @@ def save_framework_pack(files: list[dict], target_name: str | None = None) -> st
     return name
 
 
-def _run_and_zip(input_path: str, mode: str, target: str) -> bytes:
+def _run_and_zip(
+    input_path: str, mode: str, target: str, source: str | None = None
+) -> bytes:
     """Run the pipeline on `input_path` for `target` and zip the output folder.
 
     The scanner ignores dependency dirs (.venv, node_modules, __pycache__, ...),
-    so a huge folder is scanned in terms of its source only.
+    so a huge folder is scanned in terms of its source only. `source` is an
+    optional explicit source-framework override (else it is auto-detected).
     """
     if target not in list_frameworks():
+        known = ", ".join(list_frameworks()) or "(none)"
         raise ValueError(
-            f"Unknown target framework '{target}'. Upload its framework folder first."
+            f"Unknown target framework '{target}'. Known targets: {known}."
+        )
+    if source and source not in list_source_frameworks():
+        known = ", ".join(list_source_frameworks()) or "(none)"
+        raise ValueError(
+            f"Unknown source framework '{source}'. Known sources: {known}."
         )
     conversion_mode = MODE_MAP.get(mode, ConversionMode.HYBRID)
-    config = Config(mode=conversion_mode, target_framework=target)
+    config = Config(mode=conversion_mode, target_framework=target, source_framework=source)
     out_dir = tempfile.mkdtemp(prefix="fcu_out_")
     try:
         HybridPipeline(config).run(input_path, out_dir)
@@ -130,18 +143,19 @@ def convert_local_path(
     mode: str,
     target: str = "maf",
     framework_files: list[dict] | None = None,
+    source: str | None = None,
 ) -> bytes:
     """Convert a folder already on disk (no source upload) to `target`.
 
-    If `framework_files` are provided they are saved as the target pack first, so
-    the target is always backed by an uploaded/stored framework definition.
+    The target is normally chosen from the frameworks/ folder on disk. The legacy
+    `framework_files` upload is still honoured (saved as the target pack first).
     """
     if framework_files:
         target = save_framework_pack(framework_files, target)
     expanded = os.path.abspath(os.path.expanduser(input_path.strip().strip('"')))
     if not os.path.isdir(expanded):
         raise NotADirectoryError(f"Not a folder: {input_path}")
-    return _run_and_zip(expanded, mode, target)
+    return _run_and_zip(expanded, mode, target, source=source)
 
 
 def convert_folder(
@@ -149,6 +163,7 @@ def convert_folder(
     mode: str,
     target: str = "maf",
     framework_files: list[dict] | None = None,
+    source: str | None = None,
 ) -> bytes:
     """Write uploaded source files to a temp dir, convert to `target`, return a zip."""
     if framework_files:
@@ -163,6 +178,6 @@ def convert_folder(
             os.makedirs(os.path.dirname(abs_path) or in_dir, exist_ok=True)
             with open(abs_path, "w", encoding="utf-8") as fh:
                 fh.write(f.get("content", ""))
-        return _run_and_zip(in_dir, mode, target)
+        return _run_and_zip(in_dir, mode, target, source=source)
     finally:
         shutil.rmtree(in_dir, ignore_errors=True)

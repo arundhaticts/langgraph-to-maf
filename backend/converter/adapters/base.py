@@ -13,11 +13,25 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from converter.contracts import ToolSpec
+from converter.contracts import (
+    AgentSpec,
+    ConstructSupport,
+    ConstructType,
+    GraphSpec,
+    SourceVocabulary,
+    TaskSpec,
+    ToolSpec,
+)
 
 
 class SourceAdapter(ABC):
-    """Reads a specific source framework (LangGraph today)."""
+    """Reads a specific source framework (LangGraph today).
+
+    Owns everything the parser needs to know about ONE source framework:
+    detection (does this repo look like us?), the call/name `vocabulary()` the
+    AST parser matches against, and which pip packages to drop from the output.
+    Adding a source framework = one adapter, no parser/engine changes.
+    """
 
     name: str
 
@@ -30,6 +44,48 @@ class SourceAdapter(ABC):
         """pip packages specific to this SOURCE framework, dropped from the
         converted agent's requirements (they are replaced by the target's)."""
         return ()
+
+    def vocabulary(self) -> SourceVocabulary:
+        """The call/name tables the code parser matches against for this
+        framework. The default is the LangGraph vocabulary; a framework whose
+        idioms differ (CrewAI, AutoGen, Strands, ...) overrides this."""
+        return SourceVocabulary()
+
+    def detect(self, imported_roots: set[str]) -> float:
+        """Confidence in [0.0, 1.0] that a repo importing `imported_roots` is
+        written in this framework. Default: 1.0 if any `import_signatures()`
+        module was imported, else 0.0. Frameworks needing finer signals (e.g.
+        distinguishing sub-packages) may override with a graded score."""
+        return 1.0 if any(sig in imported_roots for sig in self.import_signatures()) else 0.0
+
+    def extract_agents(self, source: str) -> list[AgentSpec]:
+        """Parse agent definitions from one source file.
+
+        Only relevant for role-based frameworks (CrewAI, Strands) where agents
+        are constructed with explicit role/goal/backstory or system_prompt kwargs.
+        Returns [] for graph-based frameworks (LangGraph, MAF) whose agents are
+        implicit in the graph nodes.
+        """
+        return []
+
+    def extract_tasks(self, source: str) -> list[TaskSpec]:
+        """Parse task definitions from one source file (CrewAI model only).
+
+        Returns [] for all non-CrewAI frameworks.
+        """
+        return []
+
+    def extract_graph(self, source: str) -> GraphSpec | None:
+        """Custom whole-file graph extraction for frameworks whose graph is NOT
+        assembled with graph-builder method calls (`.add_node`/`.add_edge`).
+
+        LangGraph's graph IS builder-method calls, so it returns None here and
+        the default vocabulary-driven parser (`code_parser.extract_graph`) runs.
+        A framework like CrewAI, whose graph is `Crew(tasks=[Task(...), ...])`
+        constructor calls, overrides this to parse that shape into a `GraphSpec`.
+        Return None for a file that has no graph so the default parser still runs.
+        """
+        return None
 
 
 class TargetAdapter(ABC):
@@ -78,9 +134,26 @@ class TargetAdapter(ABC):
         added by the generator)."""
         return "from semantic_kernel.functions import kernel_function"
 
+    def tool_decorator_call(self, description_repr: str) -> str:
+        """The decorator EXPRESSION applied to a tool function (without the `@`).
+
+        Default matches MAF's `@ai_function(description=...)`. A framework whose
+        decorator does not take a `description` kwarg (e.g. LangChain's `@tool`,
+        which reads the docstring) overrides this to return a bare name."""
+        return f"{self.tool_decorator()}(description={description_repr})"
+
     def runtime_requirements(self) -> tuple[str, ...]:
         """pip packages the converted agent needs for THIS target framework."""
         return ()
+
+    def capability_matrix(self) -> dict[ConstructType, ConstructSupport]:
+        """Which IR constructs this target handles natively vs emulated vs unsupported.
+
+        The default (optimistic) assumes every construct is DIRECT. Each concrete
+        target adapter overrides only the constructs that are LOSSY or UNSUPPORTED.
+        Used by Phase 5b capability negotiation before code generation.
+        """
+        return {ct: ConstructSupport.DIRECT for ct in ConstructType}
 
 
 def to_pascal_case(snake: str) -> str:
