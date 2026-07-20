@@ -162,7 +162,7 @@ flowchart LR
     M7 --> P11[acceptance gate] --> M8a[README] --> M9[migration report]
     M9 --> DOCS[install/arch docs] --> RDY[readiness + gate]
     RDY --> REF[LLM refinement] --> OUT[(output package)]
-    M5 -. ir.json .-> DISK[(cwd)]
+    M5 -->|ir.json| DISK[(cwd)]
 ```
 
 ## Framework discovery architecture
