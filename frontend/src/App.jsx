@@ -1,5 +1,20 @@
+// Framework Conversion Utility — the entire single-page UI.
+//
+// One component: collect an agent folder (local path or browser upload) + a
+// source/target framework, POST it to the FastAPI backend, and download the
+// returned zip. Two design choices worth knowing:
+//   - Computed metrics (readiness %, accuracy, effort, filename) are read back
+//     from the response's X-* headers, never re-derived here, so the numbers
+//     match READINESS_REPORT.md exactly (see backend service/api).
+//   - The conversion endpoint is a single synchronous request, so the progress
+//     "activity log" is a client-side simulation (startActivityStream), not a
+//     server stream.
 import React, { useEffect, useRef, useState } from 'react'
 
+// Upload mode reads files in the browser; skip anything that isn't agent source
+// (dependency dirs, binaries, oversized files) BEFORE sending, so a repo with a
+// .venv or node_modules doesn't balloon the request. Mirrors the backend
+// scanner's ignore list — path mode relies on the backend to do the same.
 const IGNORE_DIRS = new Set([
   '.venv', 'venv', 'env', '.env', 'node_modules', '__pycache__', '.git',
   '.hg', '.svn', 'site-packages', '.mypy_cache', '.pytest_cache', '.tox',
@@ -17,7 +32,11 @@ function isSource(rel, size) {
 }
 
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()))
+// Empty base => same-origin '/api' (FastAPI serving the built SPA); set
+// VITE_API_BASE when the backend lives on a different origin.
 const API_BASE = import.meta.env.VITE_API_BASE || ''
+// Sentinel target meaning "upload a custom framework pack" — distinct from any
+// real framework name so it can never collide with a backend framework.
 const NEW_FW = '__new__'
 
 // Slugify a name to letters/digits/hyphens so the zip name matches the backend
@@ -161,6 +180,9 @@ export default function App() {
     setLog((prev) => prev.map((e, i) => (i === prev.length - 1 && e.kind === 'running' ? { ...e, kind: 'done' } : e)))
   }
 
+  // Cosmetic, time-driven progress: the backend is a single blocking request
+  // with no progress channel, so we advance staged messages on a timer while it
+  // runs. onConvert() clears the timer and stamps the real completion.
   function startActivityStream() {
     const stages = [
       'Upload received',
@@ -208,6 +230,9 @@ export default function App() {
         throw new Error(err.detail || 'Conversion failed')
       }
 
+      // The backend is the authority on the filename and all metrics; read them
+      // off the X-* headers and only fall back to a locally-derived name if the
+      // header is somehow absent.
       const h = (name) => res.headers.get(name) || ''
       const blob = await res.blob()
       const folderName = slug(inferFolderName(), 'agent')

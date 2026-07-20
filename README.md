@@ -226,7 +226,7 @@ flowchart TD
     J -- yes --> K[LLM refinement repair loop]
     J -- no --> L[Zip output]
     K --> L
-    L --> M[Download {input}-{target}.zip]
+    L --> M["Download {input}-{target}.zip"]
 ```
 
 For the authoritative diagrams and rationale, see
