@@ -1,0 +1,209 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 1260" font-family="Segoe UI, Arial, sans-serif">
+
+  <rect width="1100" height="1260" fill="#0f1117"/>
+
+  <!-- Title -->
+  <text x="550" y="40" text-anchor="middle" font-size="22" font-weight="bold" fill="#e2e8f0">Framework Converter — How It Works</text>
+  <text x="550" y="62" text-anchor="middle" font-size="12" fill="#64748b">Conceptual flow from source agent to converted output</text>
+
+  <!-- ============================================================ -->
+  <!-- STEP 1: USER INPUT -->
+  <!-- ============================================================ -->
+  <rect x="350" y="82" width="400" height="64" rx="12" fill="#0f172a" stroke="#38bdf8" stroke-width="2"/>
+  <text x="550" y="106" text-anchor="middle" font-size="14" font-weight="bold" fill="#38bdf8">User provides a source agent</text>
+  <text x="550" y="124" text-anchor="middle" font-size="11" fill="#94a3b8">A folder containing Python code + a README describing what the agent does</text>
+  <text x="550" y="140" text-anchor="middle" font-size="11" fill="#64748b">Picks: source framework · target framework · conversion mode</text>
+
+  <line x1="550" y1="146" x2="550" y2="174" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- ============================================================ -->
+  <!-- STEP 2: VALIDATE + DETECT -->
+  <!-- ============================================================ -->
+  <rect x="350" y="176" width="400" height="60" rx="10" fill="#1e293b" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="550" y="198" text-anchor="middle" font-size="13" font-weight="bold" fill="#a5b4fc">Validate &amp; Detect</text>
+  <text x="550" y="215" text-anchor="middle" font-size="11" fill="#64748b">Confirm README + Python files exist</text>
+  <text x="550" y="229" text-anchor="middle" font-size="11" fill="#64748b">Auto-detect source framework from imports if not specified</text>
+
+  <line x1="550" y1="236" x2="550" y2="264" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- ============================================================ -->
+  <!-- STEP 3: UNDERSTAND SOURCE -->
+  <!-- ============================================================ -->
+  <rect x="200" y="266" width="700" height="108" rx="10" fill="#1e293b" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="550" y="288" text-anchor="middle" font-size="13" font-weight="bold" fill="#a5b4fc">Understand the Source Agent</text>
+
+  <rect x="216" y="298" width="200" height="64" rx="7" fill="#0f172a" stroke="#6366f1" stroke-width="1"/>
+  <text x="316" y="318" text-anchor="middle" font-size="11" font-weight="bold" fill="#c4b5fd">Read the Code</text>
+  <text x="316" y="334" text-anchor="middle" font-size="10" fill="#64748b">Extract tools, graph nodes,</text>
+  <text x="316" y="348" text-anchor="middle" font-size="10" fill="#64748b">state fields, config values</text>
+
+  <rect x="450" y="298" width="200" height="64" rx="7" fill="#0f172a" stroke="#6366f1" stroke-width="1"/>
+  <text x="550" y="318" text-anchor="middle" font-size="11" font-weight="bold" fill="#c4b5fd">Read the README</text>
+  <text x="550" y="334" text-anchor="middle" font-size="10" fill="#64748b">Extract tool descriptions,</text>
+  <text x="550" y="348" text-anchor="middle" font-size="10" fill="#64748b">workflow narrative, state docs</text>
+
+  <rect x="684" y="298" width="200" height="64" rx="7" fill="#0f172a" stroke="#6366f1" stroke-width="1"/>
+  <text x="784" y="318" text-anchor="middle" font-size="11" font-weight="bold" fill="#c4b5fd">Merge &amp; Reconcile</text>
+  <text x="784" y="334" text-anchor="middle" font-size="10" fill="#64748b">Code is authoritative;</text>
+  <text x="784" y="348" text-anchor="middle" font-size="10" fill="#64748b">README fills gaps</text>
+
+  <line x1="550" y1="374" x2="550" y2="402" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- ============================================================ -->
+  <!-- STEP 4: BUILD IR -->
+  <!-- ============================================================ -->
+  <rect x="280" y="404" width="540" height="74" rx="10" fill="#1e293b" stroke="#38bdf8" stroke-width="2"/>
+  <text x="550" y="426" text-anchor="middle" font-size="13" font-weight="bold" fill="#7dd3fc">Build a Framework-Neutral Blueprint (IR)</text>
+  <text x="550" y="444" text-anchor="middle" font-size="11" fill="#94a3b8">Everything known about the agent in one structure — tools, graph shape,</text>
+  <text x="550" y="460" text-anchor="middle" font-size="11" fill="#94a3b8">state schema, orchestration pattern, config — with no source-specific details</text>
+  <text x="550" y="474" text-anchor="middle" font-size="11" fill="#64748b">✦ Nothing after this point looks at the original source code</text>
+
+  <line x1="550" y1="478" x2="550" y2="506" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- ============================================================ -->
+  <!-- STEP 5: CHECK WHAT TARGET CAN DO -->
+  <!-- ============================================================ -->
+  <rect x="350" y="508" width="400" height="60" rx="10" fill="#1e293b" stroke="#0ea5e9" stroke-width="1.5"/>
+  <text x="550" y="530" text-anchor="middle" font-size="13" font-weight="bold" fill="#7dd3fc">Check What the Target Can Do</text>
+  <text x="550" y="548" text-anchor="middle" font-size="11" fill="#64748b">Each construct (loops, HITL, shared state…) is rated:</text>
+  <text x="550" y="562" text-anchor="middle" font-size="11" fill="#64748b">Direct support · Lossy approximation · Unsupported</text>
+
+  <line x1="550" y1="568" x2="550" y2="596" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- ============================================================ -->
+  <!-- STEP 6: DECIDE HOW TO CONVERT (3 tiers) -->
+  <!-- ============================================================ -->
+  <rect x="100" y="598" width="900" height="164" rx="10" fill="#1e293b" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="550" y="620" text-anchor="middle" font-size="13" font-weight="bold" fill="#fcd34d">Decide How to Convert Each Construct</text>
+  <text x="550" y="636" text-anchor="middle" font-size="10" fill="#64748b">Tried in order — cheapest first, LLM only as a last resort</text>
+
+  <!-- tier 1 -->
+  <rect x="116" y="648" width="258" height="100" rx="7" fill="#0f172a" stroke="#f59e0b" stroke-width="1"/>
+  <text x="245" y="668" text-anchor="middle" font-size="12" font-weight="bold" fill="#fcd34d">Tier 1 — Pure Rules</text>
+  <text x="245" y="686" text-anchor="middle" font-size="10" fill="#94a3b8">Deterministic structural mapping</text>
+  <text x="245" y="702" text-anchor="middle" font-size="10" fill="#64748b">@tool → plugin method</text>
+  <text x="245" y="716" text-anchor="middle" font-size="10" fill="#64748b">state field → dataclass field</text>
+  <text x="245" y="730" text-anchor="middle" font-size="10" fill="#64748b">loop → while · config → constant</text>
+
+  <!-- tier 2 -->
+  <rect x="421" y="648" width="258" height="100" rx="7" fill="#0f172a" stroke="#f59e0b" stroke-width="1"/>
+  <text x="550" y="668" text-anchor="middle" font-size="12" font-weight="bold" fill="#fcd34d">Tier 2 — README Matching</text>
+  <text x="550" y="686" text-anchor="middle" font-size="10" fill="#94a3b8">When structure alone isn't enough</text>
+  <text x="550" y="702" text-anchor="middle" font-size="10" fill="#64748b">Scan workflow prose for cues:</text>
+  <text x="550" y="716" text-anchor="middle" font-size="10" fill="#64748b">"loop", "retry", "branch"…</text>
+  <text x="550" y="730" text-anchor="middle" font-size="10" fill="#64748b">Deterministic · no API call</text>
+
+  <!-- tier 3 -->
+  <rect x="726" y="648" width="258" height="100" rx="7" fill="#0f172a" stroke="#f59e0b" stroke-width="1"/>
+  <text x="855" y="668" text-anchor="middle" font-size="12" font-weight="bold" fill="#fcd34d">Tier 3 — LLM</text>
+  <text x="855" y="686" text-anchor="middle" font-size="10" fill="#94a3b8">Only for complex patterns</text>
+  <text x="855" y="702" text-anchor="middle" font-size="10" fill="#64748b">Agent-driven orchestration,</text>
+  <text x="855" y="716" text-anchor="middle" font-size="10" fill="#64748b">HITL flows, novel patterns</text>
+  <text x="855" y="730" text-anchor="middle" font-size="10" fill="#64748b">Grounded by framework docs</text>
+
+  <line x1="550" y1="762" x2="550" y2="790" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- ============================================================ -->
+  <!-- STEP 7: GENERATE CODE -->
+  <!-- ============================================================ -->
+  <rect x="200" y="792" width="700" height="108" rx="10" fill="#1e293b" stroke="#10b981" stroke-width="1.5"/>
+  <text x="550" y="814" text-anchor="middle" font-size="13" font-weight="bold" fill="#6ee7b7">Generate the Converted Code</text>
+
+  <rect x="216" y="826" width="195" height="62" rx="7" fill="#0f172a" stroke="#10b981" stroke-width="1"/>
+  <text x="313" y="845" text-anchor="middle" font-size="11" font-weight="bold" fill="#6ee7b7">Port the Logic</text>
+  <text x="313" y="861" text-anchor="middle" font-size="10" fill="#64748b">Rewrite state access idioms</text>
+  <text x="313" y="875" text-anchor="middle" font-size="10" fill="#64748b">to target conventions</text>
+
+  <rect x="452" y="826" width="195" height="62" rx="7" fill="#0f172a" stroke="#10b981" stroke-width="1"/>
+  <text x="549" y="845" text-anchor="middle" font-size="11" font-weight="bold" fill="#6ee7b7">Emit Target Files</text>
+  <text x="549" y="861" text-anchor="middle" font-size="10" fill="#64748b">Tools · orchestrator · state</text>
+  <text x="549" y="875" text-anchor="middle" font-size="10" fill="#64748b">context · config · tests</text>
+
+  <rect x="688" y="826" width="195" height="62" rx="7" fill="#0f172a" stroke="#10b981" stroke-width="1"/>
+  <text x="785" y="845" text-anchor="middle" font-size="11" font-weight="bold" fill="#6ee7b7">Apply Framework Style</text>
+  <text x="785" y="861" text-anchor="middle" font-size="10" fill="#64748b">Naming, decorators, idioms</text>
+  <text x="785" y="875" text-anchor="middle" font-size="10" fill="#64748b">per target framework rules</text>
+
+  <line x1="550" y1="900" x2="550" y2="928" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- ============================================================ -->
+  <!-- STEP 8: VERIFY -->
+  <!-- ============================================================ -->
+  <rect x="280" y="930" width="540" height="72" rx="10" fill="#1e293b" stroke="#ec4899" stroke-width="1.5"/>
+  <text x="550" y="952" text-anchor="middle" font-size="13" font-weight="bold" fill="#f9a8d4">Verify the Output</text>
+  <text x="550" y="970" text-anchor="middle" font-size="11" fill="#64748b">Every generated file must parse · all tools/nodes/HITL points accounted for</text>
+  <text x="550" y="986" text-anchor="middle" font-size="11" fill="#64748b">No forbidden source imports · required target symbols present</text>
+  <text x="550" y="1000" text-anchor="middle" font-size="11" fill="#64748b">Failures are flagged — never silently ignored</text>
+
+  <line x1="550" y1="1002" x2="550" y2="1030" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- ============================================================ -->
+  <!-- STEP 9: LLM REPAIR LOOP -->
+  <!-- ============================================================ -->
+  <rect x="350" y="1032" width="400" height="72" rx="10" fill="#1e293b" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="550" y="1054" text-anchor="middle" font-size="13" font-weight="bold" fill="#fcd34d">LLM Repair Loop</text>
+  <text x="550" y="1072" text-anchor="middle" font-size="11" fill="#64748b">If verification found issues, an LLM patches them</text>
+  <text x="550" y="1088" text-anchor="middle" font-size="11" fill="#64748b">Re-verified after each patch · up to 3 rounds</text>
+  <text x="550" y="1100" text-anchor="middle" font-size="11" fill="#64748b">Remaining issues escalate to manual action</text>
+
+  <!-- repair loop arrow back to verify -->
+  <path d="M 750 1068 Q 820 1068 820 966 Q 820 930 820 966" fill="none" stroke="#f59e0b" stroke-width="1" stroke-dasharray="5,3"/>
+  <text x="830" y="1010" font-size="10" fill="#f59e0b">retry</text>
+
+  <line x1="550" y1="1104" x2="550" y2="1132" stroke="#334155" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- ============================================================ -->
+  <!-- STEP 10: OUTPUT -->
+  <!-- ============================================================ -->
+  <rect x="200" y="1134" width="700" height="84" rx="12" fill="#0f172a" stroke="#34d399" stroke-width="2"/>
+  <text x="550" y="1158" text-anchor="middle" font-size="14" font-weight="bold" fill="#34d399">Delivered to the User</text>
+
+  <rect x="216" y="1170" width="195" height="36" rx="5" fill="#1e293b" stroke="#34d399" stroke-width="1"/>
+  <text x="313" y="1193" text-anchor="middle" font-size="11" fill="#6ee7b7">Runnable converted code</text>
+
+  <rect x="452" y="1170" width="195" height="36" rx="5" fill="#1e293b" stroke="#34d399" stroke-width="1"/>
+  <text x="549" y="1193" text-anchor="middle" font-size="11" fill="#6ee7b7">Migration report</text>
+
+  <rect x="688" y="1170" width="195" height="36" rx="5" fill="#1e293b" stroke="#34d399" stroke-width="1"/>
+  <text x="785" y="1193" text-anchor="middle" font-size="11" fill="#6ee7b7">Readiness + install docs</text>
+
+  <!-- ============================================================ -->
+  <!-- SIDE NOTE: 3 modes -->
+  <!-- ============================================================ -->
+  <rect x="28" y="598" width="150" height="164" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <text x="103" y="618" text-anchor="middle" font-size="10" font-weight="bold" fill="#94a3b8">3 MODES</text>
+  <rect x="40" y="628" width="126" height="36" rx="5" fill="#0f172a" stroke="#334155" stroke-width="1"/>
+  <text x="103" y="643" text-anchor="middle" font-size="10" font-weight="bold" fill="#a5b4fc">Deterministic</text>
+  <text x="103" y="657" text-anchor="middle" font-size="10" fill="#64748b">Tier 1+2 only</text>
+  <rect x="40" y="672" width="126" height="36" rx="5" fill="#0f172a" stroke="#334155" stroke-width="1"/>
+  <text x="103" y="687" text-anchor="middle" font-size="10" font-weight="bold" fill="#fcd34d">Hybrid</text>
+  <text x="103" y="701" text-anchor="middle" font-size="10" fill="#64748b">T1+2, LLM if needed</text>
+  <rect x="40" y="716" width="126" height="36" rx="5" fill="#0f172a" stroke="#334155" stroke-width="1"/>
+  <text x="103" y="731" text-anchor="middle" font-size="10" font-weight="bold" fill="#f9a8d4">Full LLM</text>
+  <text x="103" y="745" text-anchor="middle" font-size="10" fill="#64748b">LLM drives all</text>
+
+  <!-- ============================================================ -->
+  <!-- SIDE NOTE: key principle -->
+  <!-- ============================================================ -->
+  <rect x="922" y="404" width="150" height="74" rx="8" fill="#1e293b" stroke="#38bdf8" stroke-width="1"/>
+  <text x="997" y="424" text-anchor="middle" font-size="10" font-weight="bold" fill="#7dd3fc">KEY PRINCIPLE</text>
+  <text x="997" y="442" text-anchor="middle" font-size="10" fill="#94a3b8">The Blueprint is the</text>
+  <text x="997" y="456" text-anchor="middle" font-size="10" fill="#94a3b8">only bridge between</text>
+  <text x="997" y="470" text-anchor="middle" font-size="10" fill="#94a3b8">source and target</text>
+
+  <!-- arrow from key principle to IR box -->
+  <line x1="922" y1="441" x2="820" y2="441" stroke="#38bdf8" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#ab)"/>
+
+  <!-- ============================================================ -->
+  <!-- DEFS -->
+  <!-- ============================================================ -->
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#475569"/>
+    </marker>
+    <marker id="ab" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#38bdf8"/>
+    </marker>
+  </defs>
+
+</svg>
