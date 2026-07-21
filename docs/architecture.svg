@@ -1,0 +1,304 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 1380" font-family="Segoe UI, Arial, sans-serif">
+
+  <!-- Background -->
+  <rect width="1100" height="1380" fill="#0f1117"/>
+
+  <!-- Title -->
+  <text x="550" y="42" text-anchor="middle" font-size="22" font-weight="bold" fill="#e2e8f0">Framework Converter — Architecture &amp; File Flow</text>
+
+  <!-- ============================================================ -->
+  <!-- ROW 0: INPUT -->
+  <!-- ============================================================ -->
+  <rect x="380" y="68" width="340" height="52" rx="10" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5"/>
+  <text x="550" y="88" text-anchor="middle" font-size="11" fill="#94a3b8">INPUT</text>
+  <text x="550" y="107" text-anchor="middle" font-size="13" font-weight="bold" fill="#38bdf8">Source Agent Folder</text>
+  <text x="550" y="122" text-anchor="middle" font-size="10" fill="#64748b">README.md · *.py · requirements.txt</text>
+
+  <!-- Arrow down -->
+  <line x1="550" y1="120" x2="550" y2="148" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ============================================================ -->
+  <!-- STAGE 1: SCANNER -->
+  <!-- ============================================================ -->
+  <rect x="330" y="150" width="440" height="58" rx="8" fill="#1e293b" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="430" y="170" text-anchor="middle" font-size="10" fill="#818cf8">STAGE 1</text>
+  <text x="550" y="188" text-anchor="middle" font-size="13" font-weight="bold" fill="#a5b4fc">scanner/repo_scanner.py</text>
+  <text x="550" y="202" text-anchor="middle" font-size="10" fill="#64748b">validate · tag files · detect source framework → RepoManifest</text>
+
+  <line x1="550" y1="208" x2="550" y2="236" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ============================================================ -->
+  <!-- STAGE 2+3: PARSER -->
+  <!-- ============================================================ -->
+  <rect x="230" y="238" width="280" height="56" rx="8" fill="#1e293b" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="370" y="258" text-anchor="middle" font-size="10" fill="#818cf8">STAGE 2</text>
+  <text x="370" y="275" text-anchor="middle" font-size="12" font-weight="bold" fill="#a5b4fc">parser/code_parser.py</text>
+  <text x="370" y="289" text-anchor="middle" font-size="10" fill="#64748b">AST → tools · graph · state · config</text>
+
+  <rect x="590" y="238" width="280" height="56" rx="8" fill="#1e293b" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="730" y="258" text-anchor="middle" font-size="10" fill="#818cf8">STAGE 3</text>
+  <text x="730" y="275" text-anchor="middle" font-size="12" font-weight="bold" fill="#a5b4fc">parser/readme_parser.py</text>
+  <text x="730" y="289" text-anchor="middle" font-size="10" fill="#64748b">Markdown → sections · workflow prose</text>
+
+  <!-- converging lines -->
+  <line x1="370" y1="294" x2="370" y2="318" stroke="#475569" stroke-width="1.5"/>
+  <line x1="730" y1="294" x2="730" y2="318" stroke="#475569" stroke-width="1.5"/>
+  <line x1="370" y1="318" x2="730" y2="318" stroke="#475569" stroke-width="1.5"/>
+  <line x1="550" y1="318" x2="550" y2="340" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ============================================================ -->
+  <!-- STAGE 4: EXTRACTOR -->
+  <!-- ============================================================ -->
+  <rect x="330" y="342" width="440" height="56" rx="8" fill="#1e293b" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="430" y="362" text-anchor="middle" font-size="10" fill="#818cf8">STAGE 4</text>
+  <text x="550" y="380" text-anchor="middle" font-size="13" font-weight="bold" fill="#a5b4fc">extractor/component_extractor.py</text>
+  <text x="550" y="394" text-anchor="middle" font-size="10" fill="#64748b">merge files → ComponentInventory · assign FileAction</text>
+
+  <line x1="550" y1="398" x2="550" y2="426" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ============================================================ -->
+  <!-- STAGE 5: IR -->
+  <!-- ============================================================ -->
+  <rect x="230" y="428" width="280" height="56" rx="8" fill="#1e293b" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="370" y="448" text-anchor="middle" font-size="10" fill="#818cf8">STAGE 5a</text>
+  <text x="370" y="465" text-anchor="middle" font-size="12" font-weight="bold" fill="#a5b4fc">ir/ir_builder.py</text>
+  <text x="370" y="479" text-anchor="middle" font-size="10" fill="#64748b">assemble IR · classify nodes · write ir.json</text>
+
+  <rect x="590" y="428" width="280" height="56" rx="8" fill="#1e293b" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="730" y="448" text-anchor="middle" font-size="10" fill="#818cf8">STAGE 5b</text>
+  <text x="730" y="465" text-anchor="middle" font-size="12" font-weight="bold" fill="#a5b4fc">ir/validator.py</text>
+  <text x="730" y="479" text-anchor="middle" font-size="10" fill="#64748b">orphan tools · unguarded loops · dangling routers</text>
+
+  <line x1="370" y1="484" x2="370" y2="508" stroke="#475569" stroke-width="1.5"/>
+  <line x1="730" y1="484" x2="730" y2="508" stroke="#475569" stroke-width="1.5"/>
+  <line x1="370" y1="508" x2="730" y2="508" stroke="#475569" stroke-width="1.5"/>
+  <line x1="550" y1="508" x2="550" y2="530" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- IR badge -->
+  <rect x="455" y="510" width="190" height="22" rx="5" fill="#0f172a" stroke="#38bdf8" stroke-width="1"/>
+  <text x="550" y="525" text-anchor="middle" font-size="10" fill="#38bdf8">IR — framework-neutral boundary</text>
+
+  <line x1="550" y1="532" x2="550" y2="556" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ============================================================ -->
+  <!-- STAGE 6: ENGINE -->
+  <!-- ============================================================ -->
+  <rect x="180" y="558" width="740" height="110" rx="8" fill="#1e293b" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="300" y="578" text-anchor="middle" font-size="10" fill="#fbbf24">STAGE 6</text>
+  <text x="550" y="578" text-anchor="middle" font-size="13" font-weight="bold" fill="#fcd34d">engine/conversion_engine.py</text>
+
+  <!-- Tier 1 -->
+  <rect x="198" y="590" width="210" height="66" rx="6" fill="#0f172a" stroke="#f59e0b" stroke-width="1"/>
+  <text x="303" y="608" text-anchor="middle" font-size="10" fill="#fbbf24">TIER 1</text>
+  <text x="303" y="624" text-anchor="middle" font-size="11" font-weight="bold" fill="#fcd34d">tier1_rules.py</text>
+  <text x="303" y="638" text-anchor="middle" font-size="10" fill="#64748b">R-01..R-15 pure structural</text>
+  <text x="303" y="650" text-anchor="middle" font-size="10" fill="#64748b">no LLM · no README</text>
+
+  <!-- Tier 2 -->
+  <rect x="446" y="590" width="210" height="66" rx="6" fill="#0f172a" stroke="#f59e0b" stroke-width="1"/>
+  <text x="551" y="608" text-anchor="middle" font-size="10" fill="#fbbf24">TIER 2</text>
+  <text x="551" y="624" text-anchor="middle" font-size="11" font-weight="bold" fill="#fcd34d">tier2_readme.py</text>
+  <text x="551" y="638" text-anchor="middle" font-size="10" fill="#64748b">README keyword matching</text>
+  <text x="551" y="650" text-anchor="middle" font-size="10" fill="#64748b">deterministic fallback</text>
+
+  <!-- Tier 3 -->
+  <rect x="694" y="590" width="210" height="66" rx="6" fill="#0f172a" stroke="#f59e0b" stroke-width="1"/>
+  <text x="799" y="608" text-anchor="middle" font-size="10" fill="#fbbf24">TIER 3</text>
+  <text x="799" y="624" text-anchor="middle" font-size="11" font-weight="bold" fill="#fcd34d">tier3_llm.py</text>
+  <text x="799" y="638" text-anchor="middle" font-size="10" fill="#64748b">Gemini LLM</text>
+  <text x="799" y="650" text-anchor="middle" font-size="10" fill="#64748b">complex / HITL only</text>
+
+  <line x1="550" y1="668" x2="550" y2="692" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- capability negotiation -->
+  <rect x="330" y="694" width="440" height="44" rx="6" fill="#1e293b" stroke="#f59e0b" stroke-width="1"/>
+  <text x="550" y="714" text-anchor="middle" font-size="11" font-weight="bold" fill="#fcd34d">engine/capability_negotiation.py</text>
+  <text x="550" y="730" text-anchor="middle" font-size="10" fill="#64748b">DIRECT · LOSSY · UNSUPPORTED per construct → feeds reports + LLM</text>
+
+  <line x1="550" y1="738" x2="550" y2="762" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ============================================================ -->
+  <!-- STAGE 7: GENERATOR -->
+  <!-- ============================================================ -->
+  <rect x="180" y="764" width="740" height="120" rx="8" fill="#1e293b" stroke="#10b981" stroke-width="1.5"/>
+  <text x="300" y="784" text-anchor="middle" font-size="10" fill="#34d399">STAGE 7</text>
+  <text x="550" y="784" text-anchor="middle" font-size="13" font-weight="bold" fill="#6ee7b7">generator/code_generator.py</text>
+
+  <rect x="198" y="796" width="195" height="76" rx="6" fill="#0f172a" stroke="#10b981" stroke-width="1"/>
+  <text x="295" y="814" text-anchor="middle" font-size="11" font-weight="bold" fill="#6ee7b7">body_porter.py</text>
+  <text x="295" y="830" text-anchor="middle" font-size="10" fill="#64748b">state["x"] → ctx.x</text>
+  <text x="295" y="844" text-anchor="middle" font-size="10" fill="#64748b">return {k:v} → ctx.k=v</text>
+  <text x="295" y="858" text-anchor="middle" font-size="10" fill="#64748b">AST transform</text>
+
+  <rect x="453" y="796" width="195" height="76" rx="6" fill="#0f172a" stroke="#10b981" stroke-width="1"/>
+  <text x="550" y="814" text-anchor="middle" font-size="11" font-weight="bold" fill="#6ee7b7">targets/</text>
+  <text x="550" y="830" text-anchor="middle" font-size="10" fill="#64748b">maf · crewai</text>
+  <text x="550" y="844" text-anchor="middle" font-size="10" fill="#64748b">langgraph · aws_strands</text>
+  <text x="550" y="858" text-anchor="middle" font-size="10" fill="#64748b">via base.py interface</text>
+
+  <rect x="708" y="796" width="195" height="76" rx="6" fill="#0f172a" stroke="#10b981" stroke-width="1"/>
+  <text x="805" y="814" text-anchor="middle" font-size="11" font-weight="bold" fill="#6ee7b7">templates/</text>
+  <text x="805" y="830" text-anchor="middle" font-size="10" fill="#64748b">plugin_class.py.jinja</text>
+  <text x="805" y="844" text-anchor="middle" font-size="10" fill="#64748b">agent_context.py.jinja</text>
+  <text x="805" y="858" text-anchor="middle" font-size="10" fill="#64748b">orchestrator.py.jinja</text>
+
+  <line x1="550" y1="884" x2="550" y2="908" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ============================================================ -->
+  <!-- STAGE 10: VERIFY -->
+  <!-- ============================================================ -->
+  <rect x="330" y="910" width="440" height="56" rx="8" fill="#1e293b" stroke="#ec4899" stroke-width="1.5"/>
+  <text x="430" y="930" text-anchor="middle" font-size="10" fill="#f472b6">STAGE 10</text>
+  <text x="550" y="948" text-anchor="middle" font-size="13" font-weight="bold" fill="#f9a8d4">verify.py — Acceptance Gate</text>
+  <text x="550" y="962" text-anchor="middle" font-size="10" fill="#64748b">ast.parse · IR coverage · forbidden tokens · required symbols → ACCEPTANCE.md</text>
+
+  <line x1="550" y1="966" x2="550" y2="990" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ============================================================ -->
+  <!-- REPORTS -->
+  <!-- ============================================================ -->
+  <rect x="180" y="992" width="740" height="100" rx="8" fill="#1e293b" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="350" y="1012" text-anchor="middle" font-size="10" fill="#a78bfa">REPORTS</text>
+
+  <rect x="198" y="1022" width="220" height="58" rx="6" fill="#0f172a" stroke="#8b5cf6" stroke-width="1"/>
+  <text x="308" y="1040" text-anchor="middle" font-size="11" font-weight="bold" fill="#c4b5fd">report_generator.py</text>
+  <text x="308" y="1056" text-anchor="middle" font-size="10" fill="#64748b">auto / needs-review</text>
+  <text x="308" y="1070" text-anchor="middle" font-size="10" fill="#64748b">manual → MIGRATION_REPORT.md</text>
+
+  <rect x="440" y="1022" width="220" height="58" rx="6" fill="#0f172a" stroke="#8b5cf6" stroke-width="1"/>
+  <text x="550" y="1040" text-anchor="middle" font-size="11" font-weight="bold" fill="#c4b5fd">readiness_report.py</text>
+  <text x="550" y="1056" text-anchor="middle" font-size="10" fill="#64748b">remaining work · time est.</text>
+  <text x="550" y="1070" text-anchor="middle" font-size="10" fill="#64748b">accuracy table → READINESS_REPORT.md</text>
+
+  <rect x="682" y="1022" width="220" height="58" rx="6" fill="#0f172a" stroke="#8b5cf6" stroke-width="1"/>
+  <text x="792" y="1040" text-anchor="middle" font-size="11" font-weight="bold" fill="#c4b5fd">docs_generator.py</text>
+  <text x="792" y="1056" text-anchor="middle" font-size="10" fill="#64748b">INSTALL.md</text>
+  <text x="792" y="1070" text-anchor="middle" font-size="10" fill="#64748b">ARCHITECTURE.md (output)</text>
+
+  <line x1="550" y1="1092" x2="550" y2="1116" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ============================================================ -->
+  <!-- STAGE 11: LLM REFINEMENT -->
+  <!-- ============================================================ -->
+  <rect x="330" y="1118" width="440" height="56" rx="8" fill="#1e293b" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="430" y="1138" text-anchor="middle" font-size="10" fill="#fbbf24">STAGE 11</text>
+  <text x="550" y="1156" text-anchor="middle" font-size="13" font-weight="bold" fill="#fcd34d">generator/llm_refinement.py</text>
+  <text x="550" y="1170" text-anchor="middle" font-size="10" fill="#64748b">LLM repair loop (≤3 iter) · graded by acceptance gate · graceful skip if no key</text>
+
+  <line x1="550" y1="1174" x2="550" y2="1198" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ============================================================ -->
+  <!-- OUTPUT -->
+  <!-- ============================================================ -->
+  <rect x="380" y="1200" width="340" height="52" rx="10" fill="#1e293b" stroke="#34d399" stroke-width="1.5"/>
+  <text x="550" y="1220" text-anchor="middle" font-size="11" fill="#94a3b8">OUTPUT</text>
+  <text x="550" y="1238" text-anchor="middle" font-size="13" font-weight="bold" fill="#34d399">Converted Agent Package (.zip)</text>
+  <text x="550" y="1253" text-anchor="middle" font-size="10" fill="#64748b">*.py · requirements.txt · *.md reports</text>
+
+  <!-- ============================================================ -->
+  <!-- ADAPTER LAYER (right side) -->
+  <!-- ============================================================ -->
+  <rect x="880" y="420" width="192" height="480" rx="8" fill="#1e293b" stroke="#0ea5e9" stroke-width="1.5"/>
+  <text x="976" y="442" text-anchor="middle" font-size="11" font-weight="bold" fill="#7dd3fc">ADAPTER LAYER</text>
+
+  <rect x="893" y="452" width="166" height="56" rx="5" fill="#0f172a" stroke="#0ea5e9" stroke-width="1"/>
+  <text x="976" y="470" text-anchor="middle" font-size="10" font-weight="bold" fill="#7dd3fc">adapters/base.py</text>
+  <text x="976" y="484" text-anchor="middle" font-size="10" fill="#64748b">SourceAdapter</text>
+  <text x="976" y="498" text-anchor="middle" font-size="10" fill="#64748b">TargetAdapter</text>
+
+  <rect x="893" y="520" width="166" height="70" rx="5" fill="#0f172a" stroke="#0ea5e9" stroke-width="1"/>
+  <text x="976" y="538" text-anchor="middle" font-size="10" font-weight="bold" fill="#7dd3fc">source/</text>
+  <text x="976" y="554" text-anchor="middle" font-size="10" fill="#64748b">langgraph</text>
+  <text x="976" y="568" text-anchor="middle" font-size="10" fill="#64748b">crewai · aws_strands</text>
+  <text x="976" y="582" text-anchor="middle" font-size="10" fill="#64748b">maf</text>
+
+  <rect x="893" y="602" width="166" height="70" rx="5" fill="#0f172a" stroke="#0ea5e9" stroke-width="1"/>
+  <text x="976" y="620" text-anchor="middle" font-size="10" font-weight="bold" fill="#7dd3fc">target/</text>
+  <text x="976" y="636" text-anchor="middle" font-size="10" fill="#64748b">maf · crewai</text>
+  <text x="976" y="650" text-anchor="middle" font-size="10" fill="#64748b">langgraph · aws_strands</text>
+  <text x="976" y="664" text-anchor="middle" font-size="10" fill="#64748b">dynamic (custom pack)</text>
+
+  <rect x="893" y="684" width="166" height="100" rx="5" fill="#0f172a" stroke="#0ea5e9" stroke-width="1"/>
+  <text x="976" y="702" text-anchor="middle" font-size="10" font-weight="bold" fill="#7dd3fc">frameworks/ (knowledge)</text>
+  <text x="976" y="718" text-anchor="middle" font-size="10" fill="#64748b">maf/docs.md</text>
+  <text x="976" y="732" text-anchor="middle" font-size="10" fill="#64748b">crewai/docs.md</text>
+  <text x="976" y="746" text-anchor="middle" font-size="10" fill="#64748b">langgraph/docs.md</text>
+  <text x="976" y="760" text-anchor="middle" font-size="10" fill="#64748b">aws_strands/docs.md</text>
+  <text x="976" y="774" text-anchor="middle" font-size="10" fill="#64748b">vocabulary.json ×4</text>
+
+  <!-- adapter connects to engine and generator -->
+  <line x1="920" y1="630" x2="920" y2="630" stroke="none"/>
+  <line x1="880" y1="630" x2="855" y2="630" stroke="#0ea5e9" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrb)"/>
+  <line x1="880" y1="740" x2="855" y2="820" stroke="#0ea5e9" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrb)"/>
+
+  <!-- ============================================================ -->
+  <!-- HTTP LAYER (left side) -->
+  <!-- ============================================================ -->
+  <rect x="28" y="560" width="138" height="200" rx="8" fill="#1e293b" stroke="#f43f5e" stroke-width="1.5"/>
+  <text x="97" y="582" text-anchor="middle" font-size="11" font-weight="bold" fill="#fb7185">HTTP LAYER</text>
+
+  <rect x="38" y="593" width="118" height="48" rx="5" fill="#0f172a" stroke="#f43f5e" stroke-width="1"/>
+  <text x="97" y="611" text-anchor="middle" font-size="10" font-weight="bold" fill="#fb7185">api.py</text>
+  <text x="97" y="625" text-anchor="middle" font-size="10" fill="#64748b">/api/convert</text>
+  <text x="97" y="637" text-anchor="middle" font-size="10" fill="#64748b">/api/frameworks</text>
+
+  <rect x="38" y="651" width="118" height="48" rx="5" fill="#0f172a" stroke="#f43f5e" stroke-width="1"/>
+  <text x="97" y="669" text-anchor="middle" font-size="10" font-weight="bold" fill="#fb7185">service.py</text>
+  <text x="97" y="683" text-anchor="middle" font-size="10" fill="#64748b">folder → zip</text>
+  <text x="97" y="695" text-anchor="middle" font-size="10" fill="#64748b">orchestrates pipeline</text>
+
+  <rect x="38" y="709" width="118" height="40" rx="5" fill="#0f172a" stroke="#f43f5e" stroke-width="1"/>
+  <text x="97" y="727" text-anchor="middle" font-size="10" font-weight="bold" fill="#fb7185">frontend/App.jsx</text>
+  <text x="97" y="741" text-anchor="middle" font-size="10" fill="#64748b">React SPA · KPI cards</text>
+
+  <!-- http connects to pipeline -->
+  <line x1="166" y1="670" x2="180" y2="670" stroke="#f43f5e" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrc)"/>
+
+  <!-- ============================================================ -->
+  <!-- CONTRACTS BADGE (bottom left) -->
+  <!-- ============================================================ -->
+  <rect x="28" y="790" width="138" height="120" rx="8" fill="#1e293b" stroke="#64748b" stroke-width="1.5"/>
+  <text x="97" y="810" text-anchor="middle" font-size="10" font-weight="bold" fill="#94a3b8">FROZEN CONTRACTS</text>
+  <text x="97" y="826" text-anchor="middle" font-size="10" fill="#64748b">contracts.py</text>
+  <text x="97" y="844" text-anchor="middle" font-size="10" fill="#475569">RepoManifest</text>
+  <text x="97" y="858" text-anchor="middle" font-size="10" fill="#475569">ComponentInventory</text>
+  <text x="97" y="872" text-anchor="middle" font-size="10" fill="#475569">IR · ConversionResult</text>
+  <text x="97" y="886" text-anchor="middle" font-size="10" fill="#475569">MigrationReport</text>
+  <text x="97" y="900" text-anchor="middle" font-size="10" fill="#475569">AcceptanceReport</text>
+
+  <!-- ============================================================ -->
+  <!-- LEGEND -->
+  <!-- ============================================================ -->
+  <rect x="28" y="1270" width="500" height="90" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <text x="278" y="1290" text-anchor="middle" font-size="11" font-weight="bold" fill="#94a3b8">Legend</text>
+  <rect x="44" y="1300" width="14" height="10" rx="2" fill="none" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="65" y="1310" font-size="10" fill="#94a3b8">Pipeline stage</text>
+  <rect x="160" y="1300" width="14" height="10" rx="2" fill="none" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="181" y="1310" font-size="10" fill="#94a3b8">Engine / LLM</text>
+  <rect x="280" y="1300" width="14" height="10" rx="2" fill="none" stroke="#10b981" stroke-width="1.5"/>
+  <text x="301" y="1310" font-size="10" fill="#94a3b8">Generator</text>
+  <rect x="380" y="1300" width="14" height="10" rx="2" fill="none" stroke="#0ea5e9" stroke-width="1.5"/>
+  <text x="401" y="1310" font-size="10" fill="#94a3b8">Adapter / knowledge</text>
+  <line x1="44" y1="1335" x2="70" y2="1335" stroke="#475569" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="78" y="1339" font-size="10" fill="#94a3b8">Data flow</text>
+  <line x1="160" y1="1335" x2="186" y2="1335" stroke="#0ea5e9" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrb)"/>
+  <text x="194" y="1339" font-size="10" fill="#94a3b8">Config / plug-in</text>
+  <rect x="280" y="1328" width="14" height="10" rx="2" fill="none" stroke="#38bdf8" stroke-width="1.5"/>
+  <text x="301" y="1338" font-size="10" fill="#94a3b8">I/O boundary</text>
+
+  <!-- ============================================================ -->
+  <!-- ARROW MARKERS -->
+  <!-- ============================================================ -->
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#475569"/>
+    </marker>
+    <marker id="arrb" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#0ea5e9"/>
+    </marker>
+    <marker id="arrc" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#f43f5e"/>
+    </marker>
+  </defs>
+
+</svg>
