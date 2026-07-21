@@ -31,7 +31,7 @@ Endpoints:
 
 ```bash
 cd backend
-python -m converter.main --input ../examples/sample_agent --output ../converted --mode hybrid
+python -m converter.main --input /path/to/your/agent --output ../converted --mode hybrid
 ```
 
 ## Tests

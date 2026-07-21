@@ -179,7 +179,6 @@ framework-converter/
 │   ├── src/App.jsx            # the entire UI
 │   ├── src/styles.css
 │   └── vite.config.js
-├── examples/sample_agent/     # a small LangGraph agent to try
 ├── FRAMEWORK_AUTHORING.md     # how to add/remove a framework
 ├── ARCHITECTURE.md            # authoritative architecture doc
 ├── ENGINEERING_GUIDE.md       # end-to-end data flow + onboarding + extension guide
@@ -247,8 +246,7 @@ npm install
 npm run dev        # http://localhost:5173, proxies /api -> :8000
 ```
 
-Then open the UI, paste the path to `examples/sample_agent`, choose
-**LangGraph → AWS Strands** (or any pair), and click **Convert & download**.
+Then open the UI, paste the path to your agent folder, choose a source/target framework pair, and click **Convert & download**.
 
 ## Backend setup
 
@@ -304,7 +302,7 @@ output to `.env` and fill in secrets before running a converted agent.
 
 ```bash
 cd backend
-python -m converter.main --input ../examples/sample_agent \
+python -m converter.main --input /path/to/your/agent \
                          --output ../converted \
                          --source langgraph --target aws_strands \
                          --mode hybrid
@@ -368,18 +366,9 @@ Notes:
 
 ## Example workflows
 
-**LangGraph → AWS Strands (the reference case):** the bundled
-`examples/sample_agent` is a "Test Optimiser" LangGraph agent with two tools, a
-`generate → gate` loop, a `route` router, and an `interrupt()` HITL node.
-Converting it to AWS Strands produces an orchestrator where each node is a real
-`@tool` running the ported logic on a shared `AgentContext`, driven in the
-source order with the loop and router preserved. See
-[ENGINEERING_GUIDE.md](ENGINEERING_GUIDE.md) for the exact transformation.
+**LangGraph → AWS Strands:** point `--input` at any LangGraph agent folder. The converter produces an orchestrator where each node becomes a real `@tool` running on a shared `AgentContext`, with loops and routers preserved. See [ENGINEERING_GUIDE.md](docs/ENGINEERING_GUIDE.md) for the exact transformation.
 
-**Any pair:** the same input can target MAF (a `WorkflowBuilder` graph with a
-bundled offline SDK stub), CrewAI (a sequential `Crew` or a branching `Flow`),
-or LangGraph (a real `StateGraph`). The [test matrix](backend/converter/tests/test_all_frameworks_matrix.py)
-exercises the full cross-product.
+**Any pair:** the same input can target MAF (a `WorkflowBuilder` graph with a bundled offline SDK stub), CrewAI (a sequential `Crew` or a branching `Flow`), or LangGraph (a real `StateGraph`). The [test matrix](backend/converter/tests/test_all_frameworks_matrix.py) exercises the full cross-product.
 
 ## Generated outputs
 

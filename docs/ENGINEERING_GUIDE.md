@@ -332,14 +332,6 @@ Below, each logical stage is documented with the fields the spec asked for.
 - **Fixtures:** `fixtures/multi_module_agent/` — a realistic multi-file LangGraph
   agent (7-node `StateGraph`, conditional edges, loop, HITL, `MemorySaver`).
 
-### `examples/`
-
-- **Purpose:** a runnable sample to try the converter.
-- **Contents:** `examples/sample_agent/` — a LangGraph "Test Optimiser": `State`
-  TypedDict with append-only reducers, `@tool`s `read_tests` / `detect_flaky_tests`,
-  nodes `generate` / `gate` / `hitl_approve` (`interrupt()`), a `route` router,
-  a `generate→gate` loop, constants `MAX_GEN_RETRIES=3` / `COVERAGE_FLOOR=0.8`.
-
 ---
 
 ## Key execution paths

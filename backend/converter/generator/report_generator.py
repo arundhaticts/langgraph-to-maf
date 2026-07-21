@@ -110,9 +110,9 @@ def render_report(report: MigrationReport) -> str:
             lines.append(empty)
         else:
             for entry in entries:
-                lines.append(entry.text)
+                lines.append(f"- {entry.text}")
                 if entry.detail:
-                    lines.append(f"  {entry.detail}")
+                    lines.append(f"  - {entry.detail}")
         lines.append("")
 
     section("Auto-converted", report.auto_converted, "_Nothing auto-converted._")
